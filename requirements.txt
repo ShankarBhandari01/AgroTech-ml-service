@@ -7,3 +7,10 @@ xgboost
 imbalanced-learn
 shap
 joblib
+psycopg2-binary
+sqlalchemy
+slowapi
+cachetools
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart

@@ -1,14 +1,68 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Depends
-from fastapi.security import APIKeyHeader
+from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from cachetools import TTLCache
 import joblib
 import pandas as pd
 import numpy as np
 import os
-import sqlite3
+import secrets
+import hashlib
+from datetime import datetime, timedelta
 from typing import Optional
+from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, text
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
+
+# ==============================
+# DATABASE SETUP — POSTGRESQL
+# ==============================
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+# Railway uses postgres:// but SQLAlchemy needs postgresql://
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# ==============================
+# DATABASE MODELS
+# ==============================
+class PredictionLog(Base):
+    __tablename__ = "prediction_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    prediction = Column(Integer)
+    priority_label = Column(String)
+    risk_score_percent = Column(Float)
+    top_risk_factors = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class APIKey(Base):
+    __tablename__ = "api_keys"
+
+    id = Column(Integer, primary_key=True, index=True)
+    key_hash = Column(String, unique=True, index=True)
+    client_name = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    is_active = Column(Integer, default=1)
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+def init_db():
+    Base.metadata.create_all(bind=engine)
+    print("PostgreSQL tables created successfully!")
 
 # ==============================
 # LOAD MODEL AND FEATURES
@@ -18,41 +72,15 @@ features = joblib.load("farmerxential_features.pkl")
 explainer = joblib.load("farmerxential_shap_explainer.pkl")
 
 # ==============================
-# DATABASE SETUP
+# RATE LIMITER
 # ==============================
-DB_PATH = "farmerxential.db"
+limiter = Limiter(key_func=get_remote_address)
 
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def init_db():
-    conn = get_db()
-    cursor = conn.cursor()
-
-    table_exists = cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='farmers'"
-    ).fetchone()
-
-    if not table_exists:
-        print("Loading CSV data into database...")
-        df = pd.read_csv("farmerxential_farmer_priority_output.csv")
-
-        zone_mapping = {
-            0: "North Central", 1: "North East", 2: "North West",
-            3: "South East", 4: "South South", 5: "South West"
-        }
-        df["priority_label"] = df["predicted_intervention_level"].map({
-            0: "Low Priority", 1: "Medium Priority", 2: "High Priority"
-        })
-        df["zone_name"] = df["zone"].map(zone_mapping)
-
-        df.to_sql("farmers", conn, if_exists="replace", index=False)
-        print(f"Loaded {len(df)} farmers into database!")
-
-    conn.commit()
-    conn.close()
+# ==============================
+# CACHE — stores responses for 5 minutes
+# ==============================
+stats_cache = TTLCache(maxsize=100, ttl=300)
+farmers_cache = TTLCache(maxsize=100, ttl=300)
 
 # ==============================
 # LIFESPAN
@@ -65,7 +93,15 @@ async def lifespan(app: FastAPI):
 # ==============================
 # APP
 # ==============================
-app = FastAPI(title="FarmerXential API", version="2.0", lifespan=lifespan)
+app = FastAPI(
+    title="FarmerXential API",
+    version="3.0",
+    description="AI-powered agricultural intelligence system by Lalishank Holdings Limited",
+    lifespan=lifespan
+)
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ==============================
 # CORS
@@ -79,21 +115,28 @@ app.add_middleware(
 )
 
 # ==============================
-# API KEY AUTH
+# OAUTH2 + DYNAMIC API KEY AUTH
 # ==============================
-API_KEY = os.environ.get("FARMERXENTIAL_API_KEY", "farmerxential-dev-key-2024")
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/token")
 
-async def verify_api_key(api_key: str = Depends(api_key_header)):
-    if api_key != API_KEY:
+def hash_key(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
+
+def verify_api_key(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    key_hash = hash_key(token)
+    api_key = db.query(APIKey).filter(
+        APIKey.key_hash == key_hash,
+        APIKey.is_active == 1
+    ).first()
+    if not api_key:
         raise HTTPException(
             status_code=401,
-            detail="Invalid or missing API key."
+            detail="Invalid or expired API key."
         )
     return api_key
 
 # ==============================
-# INPUT SCHEMAS
+# INPUT SCHEMA
 # ==============================
 class FarmerInput(BaseModel):
     yield_value: float
@@ -121,12 +164,6 @@ class FarmerInput(BaseModel):
     received_credit: int
     head_gender: int
 
-class FarmerUpdate(BaseModel):
-    intervention_level: Optional[int] = None
-    shock_level: Optional[int] = None
-    has_extension_access: Optional[int] = None
-    received_credit: Optional[int] = None
-
 # ==============================
 # HEALTH CHECK
 # ==============================
@@ -134,178 +171,226 @@ class FarmerUpdate(BaseModel):
 def home():
     return {
         "message": "FarmerXential API is running!",
-        "version": "2.0",
+        "version": "3.0",
         "status": "healthy",
         "product": "FarmerXential by Lalishank Holdings Limited"
     }
 
 # ==============================
-# STATS
+# GENERATE API KEY — Dynamic key generation
 # ==============================
-@app.get("/stats", dependencies=[Depends(verify_api_key)])
-def get_stats():
-    conn = get_db()
-    cursor = conn.cursor()
+@app.post("/auth/register")
+@limiter.limit("5/minute")
+def register_client(
+    request: Request,
+    client_name: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Generate a dynamic API key for a new client.
+    Think of it like: sign up and get your unique access key.
+    """
+    raw_key = secrets.token_urlsafe(32)
+    key_hash = hash_key(raw_key)
 
-    total = cursor.execute("SELECT COUNT(*) FROM farmers").fetchone()[0]
-    high = cursor.execute("SELECT COUNT(*) FROM farmers WHERE predicted_intervention_level = 2").fetchone()[0]
-    medium = cursor.execute("SELECT COUNT(*) FROM farmers WHERE predicted_intervention_level = 1").fetchone()[0]
-    low = cursor.execute("SELECT COUNT(*) FROM farmers WHERE predicted_intervention_level = 0").fetchone()[0]
-    alerts = cursor.execute("SELECT COUNT(*) FROM farmers WHERE risk_score > 0.7").fetchone()[0]
-    avg_risk = cursor.execute("SELECT AVG(risk_score) FROM farmers").fetchone()[0]
-
-    zones = cursor.execute("""
-        SELECT zone_name, COUNT(*) as count
-        FROM farmers
-        WHERE predicted_intervention_level = 2
-        GROUP BY zone_name
-    """).fetchall()
-
-    conn.close()
+    new_key = APIKey(
+        key_hash=key_hash,
+        client_name=client_name,
+        created_at=datetime.utcnow(),
+        is_active=1
+    )
+    db.add(new_key)
+    db.commit()
 
     return {
-        "total_farmers": total,
-        "high_priority_count": high,
-        "medium_priority_count": medium,
-        "low_priority_count": low,
-        "active_alerts": alerts,
-        "avg_risk_score": round(float(avg_risk) * 100, 1) if avg_risk else 0,
-        "zones": {row["zone_name"]: row["count"] for row in zones}
+        "message": f"API key generated for {client_name}",
+        "api_key": raw_key,
+        "warning": "Store this key securely. It will not be shown again.",
+        "usage": "Include in requests as: Authorization: Bearer YOUR_KEY"
     }
 
 # ==============================
-# GET ALL FARMERS
+# GET TOKEN — OAuth2 token endpoint
 # ==============================
-@app.get("/farmers", dependencies=[Depends(verify_api_key)])
+@app.post("/auth/token")
+@limiter.limit("10/minute")
+def get_token(
+    request: Request,
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
+):
+    """
+    OAuth2 token endpoint.
+    Username = client_name, Password = api_key
+    """
+    key_hash = hash_key(form_data.password)
+    api_key = db.query(APIKey).filter(
+        APIKey.key_hash == key_hash,
+        APIKey.is_active == 1
+    ).first()
+
+    if not api_key or api_key.client_name != form_data.username:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials."
+        )
+
+    return {
+        "access_token": form_data.password,
+        "token_type": "bearer"
+    }
+
+# ==============================
+# STATS — Cached
+# ==============================
+@app.get("/stats")
+@limiter.limit("30/minute")
+def get_stats(
+    request: Request,
+    db: Session = Depends(get_db),
+    api_key: APIKey = Depends(verify_api_key)
+):
+    # Check cache first
+    if "stats" in stats_cache:
+        return stats_cache["stats"]
+
+    # Load from CSV since this is reference data
+    df = pd.read_csv("farmerxential_farmer_priority_output.csv")
+    df["risk_score_pct"] = df["risk_score"] * 100
+
+    zone_mapping = {
+        0: "North Central", 1: "North East", 2: "North West",
+        3: "South East", 4: "South South", 5: "South West"
+    }
+
+    result = {
+        "total_farmers": len(df),
+        "high_priority_count": int((df["predicted_intervention_level"] == 2).sum()),
+        "medium_priority_count": int((df["predicted_intervention_level"] == 1).sum()),
+        "low_priority_count": int((df["predicted_intervention_level"] == 0).sum()),
+        "active_alerts": int((df["risk_score"] > 0.7).sum()),
+        "avg_risk_score": round(float(df["risk_score_pct"].mean()), 1),
+        "zones": {
+            zone_mapping.get(int(zone), str(zone)): int(count)
+            for zone, count in df.groupby("zone")["predicted_intervention_level"]
+            .apply(lambda x: (x == 2).sum()).items()
+        },
+        "cached": False
+    }
+
+    # Store in cache
+    stats_cache["stats"] = {**result, "cached": True}
+    return result
+
+# ==============================
+# GET FARMERS — Cached with pagination
+# ==============================
+@app.get("/farmers")
+@limiter.limit("30/minute")
 def get_farmers(
+    request: Request,
     zone: Optional[int] = None,
     priority: Optional[int] = None,
     limit: int = 100,
-    offset: int = 0
+    offset: int = 0,
+    api_key: APIKey = Depends(verify_api_key)
 ):
-    conn = get_db()
-    cursor = conn.cursor()
+    cache_key = f"farmers_{zone}_{priority}_{limit}_{offset}"
 
-    query = "SELECT * FROM farmers WHERE 1=1"
-    params = []
+    if cache_key in farmers_cache:
+        return farmers_cache[cache_key]
+
+    df = pd.read_csv("farmerxential_farmer_priority_output.csv")
+    df["risk_score"] = (df["risk_score"] * 100).round(1)
+    df["priority_label"] = df["predicted_intervention_level"].map({
+        0: "Low Priority", 1: "Medium Priority", 2: "High Priority"
+    })
+
+    zone_mapping = {
+        0: "North Central", 1: "North East", 2: "North West",
+        3: "South East", 4: "South South", 5: "South West"
+    }
+    df["zone_name"] = df["zone"].map(zone_mapping)
 
     if zone is not None:
-        query += " AND zone = ?"
-        params.append(zone)
-
+        df = df[df["zone"] == zone]
     if priority is not None:
-        query += " AND predicted_intervention_level = ?"
-        params.append(priority)
+        df = df[df["predicted_intervention_level"] == priority]
 
-    query += " ORDER BY risk_score DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
+    df = df.sort_values("risk_score", ascending=False)
+    total = len(df)
+    df = df.iloc[offset:offset + limit]
 
-    farmers = cursor.execute(query, params).fetchall()
-    total = cursor.execute("SELECT COUNT(*) FROM farmers").fetchone()[0]
-    conn.close()
-
-    return {
+    result = {
         "total": total,
         "limit": limit,
         "offset": offset,
-        "farmers": [dict(f) for f in farmers]
+        "farmers": df.to_dict(orient="records")
     }
 
-# ==============================
-# GET SINGLE FARMER
-# ==============================
-@app.get("/farmers/{hhid}", dependencies=[Depends(verify_api_key)])
-def get_farmer(hhid: int):
-    conn = get_db()
-    farmer = conn.execute(
-        "SELECT * FROM farmers WHERE hhid = ?", (hhid,)
-    ).fetchone()
-    conn.close()
-
-    if not farmer:
-        raise HTTPException(status_code=404, detail=f"Farmer {hhid} not found")
-
-    return dict(farmer)
+    farmers_cache[cache_key] = result
+    return result
 
 # ==============================
-# UPDATE FARMER
+# GET ALERTS — Cached
 # ==============================
-@app.patch("/farmers/{hhid}", dependencies=[Depends(verify_api_key)])
-def update_farmer(hhid: int, update: FarmerUpdate):
-    conn = get_db()
+@app.get("/alerts")
+@limiter.limit("30/minute")
+def get_alerts(
+    request: Request,
+    api_key: APIKey = Depends(verify_api_key)
+):
+    if "alerts" in stats_cache:
+        return stats_cache["alerts"]
 
-    farmer = conn.execute(
-        "SELECT * FROM farmers WHERE hhid = ?", (hhid,)
-    ).fetchone()
+    df = pd.read_csv("farmerxential_farmer_priority_output.csv")
+    high_priority = df[df["predicted_intervention_level"] == 2].copy()
+    high_priority["risk_score"] = (high_priority["risk_score"] * 100).round(1)
 
-    if not farmer:
-        conn.close()
-        raise HTTPException(status_code=404, detail=f"Farmer {hhid} not found")
-
-    updates = {k: v for k, v in update.dict().items() if v is not None}
-
-    if updates:
-        set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
-        values = list(updates.values()) + [hhid]
-        conn.execute(
-            f"UPDATE farmers SET {set_clause} WHERE hhid = ?", values
-        )
-        conn.commit()
-
-    updated = conn.execute(
-        "SELECT * FROM farmers WHERE hhid = ?", (hhid,)
-    ).fetchone()
-    conn.close()
-
-    return dict(updated)
-
-# ==============================
-# GET ALERTS
-# ==============================
-@app.get("/alerts", dependencies=[Depends(verify_api_key)])
-def get_alerts():
-    conn = get_db()
-    high_priority = conn.execute("""
-        SELECT * FROM farmers
-        WHERE predicted_intervention_level = 2
-        ORDER BY risk_score DESC
-    """).fetchall()
-    conn.close()
+    zone_mapping = {
+        0: "North Central", 1: "North East", 2: "North West",
+        3: "South East", 4: "South South", 5: "South West"
+    }
+    high_priority["zone_name"] = high_priority["zone"].map(zone_mapping)
 
     alerts = []
-    for row in high_priority:
-        row = dict(row)
+    for _, row in high_priority.iterrows():
         reasons = []
-        if row.get("yield_original", 1) < 1:
+        if row["yield_original"] < 1:
             reasons.append("Low crop yield")
-        if row.get("has_extension_access", 1) == 0:
+        if row["has_extension_access"] == 0:
             reasons.append("No extension access")
-        if row.get("shock_level", 0) > 0:
+        if row["shock_level"] > 0:
             reasons.append("Experienced agricultural shock")
-        if row.get("received_credit", 1) == 0:
+        if row["received_credit"] == 0:
             reasons.append("No credit access")
 
         alerts.append({
-            "hhid": row["hhid"],
-            "risk_score": round(float(row["risk_score"]) * 100, 1),
-            "priority_label": row["priority_label"],
+            "hhid": int(row["hhid"]),
+            "risk_score": row["risk_score"],
+            "priority_label": "High Priority",
             "zone_name": row["zone_name"],
             "reasons": reasons,
-            "shock_level": row.get("shock_level", 0),
-            "has_extension_access": row.get("has_extension_access", 0),
-            "yield_original": round(float(row.get("yield_original", 0)), 2)
+            "shock_level": int(row["shock_level"]),
+            "has_extension_access": int(row["has_extension_access"]),
+            "yield_original": round(float(row["yield_original"]), 2)
         })
 
-    return {
-        "total_alerts": len(alerts),
-        "alerts": alerts
-    }
+    result = {"total_alerts": len(alerts), "alerts": alerts}
+    stats_cache["alerts"] = result
+    return result
 
 # ==============================
-# PREDICT SINGLE FARMER
+# PREDICT — Core ML endpoint
 # ==============================
-@app.post("/predict", dependencies=[Depends(verify_api_key)])
-def predict(farmer: FarmerInput):
+@app.post("/predict")
+@limiter.limit("20/minute")
+def predict(
+    request: Request,
+    farmer: FarmerInput,
+    db: Session = Depends(get_db),
+    api_key: APIKey = Depends(verify_api_key)
+):
     input_data = pd.DataFrame([{
         "yield": farmer.yield_value,
         "has_extension_access": farmer.has_extension_access,
@@ -339,6 +424,7 @@ def predict(farmer: FarmerInput):
     risk_score = round(float(probabilities[2]) * 100, 1)
 
     priority_map = {0: "Low Priority", 1: "Medium Priority", 2: "High Priority"}
+    priority_label = priority_map[int(prediction)]
 
     shap_values = explainer.shap_values(input_data)
     shap_class2 = shap_values[:, :, 2][0]
@@ -349,9 +435,20 @@ def predict(farmer: FarmerInput):
 
     top_reasons = shap_df[shap_df["impact"] > 0].head(3)["feature"].tolist()
 
+    # Persist prediction to PostgreSQL
+    log = PredictionLog(
+        prediction=int(prediction),
+        priority_label=priority_label,
+        risk_score_percent=risk_score,
+        top_risk_factors=", ".join(top_reasons),
+        created_at=datetime.utcnow()
+    )
+    db.add(log)
+    db.commit()
+
     return {
         "prediction": int(prediction),
-        "priority_label": priority_map[int(prediction)],
+        "priority_label": priority_label,
         "risk_score_percent": risk_score,
         "probabilities": {
             "low": round(float(probabilities[0]) * 100, 1),
@@ -359,4 +456,35 @@ def predict(farmer: FarmerInput):
             "high": round(float(probabilities[2]) * 100, 1)
         },
         "top_risk_factors": top_reasons
+    }
+
+# ==============================
+# PREDICTION HISTORY — from PostgreSQL
+# ==============================
+@app.get("/predictions/history")
+@limiter.limit("20/minute")
+def get_prediction_history(
+    request: Request,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    api_key: APIKey = Depends(verify_api_key)
+):
+    logs = db.query(PredictionLog)\
+        .order_by(PredictionLog.created_at.desc())\
+        .limit(limit)\
+        .all()
+
+    return {
+        "total": len(logs),
+        "predictions": [
+            {
+                "id": log.id,
+                "prediction": log.prediction,
+                "priority_label": log.priority_label,
+                "risk_score_percent": log.risk_score_percent,
+                "top_risk_factors": log.top_risk_factors,
+                "created_at": log.created_at.isoformat()
+            }
+            for log in logs
+        ]
     }
