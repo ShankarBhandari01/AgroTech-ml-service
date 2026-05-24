@@ -81,7 +81,7 @@ app.add_middleware(
 # ==============================
 # API KEY AUTH
 # ==============================
-API_KEY = os.environ.get("AGROREACH_API_KEY", "agroreach-dev-key-2024")
+API_KEY = os.environ.get("FARMERXENTIAL_API_KEY", "farmerxential-dev-key-2024")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 async def verify_api_key(api_key: str = Depends(api_key_header)):

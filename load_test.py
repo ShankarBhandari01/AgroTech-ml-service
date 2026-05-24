@@ -3,7 +3,7 @@ import httpx
 import time
 
 API_URL = "https://web-production-92e5f.up.railway.app"
-API_KEY = "agroreach-secret-key-2024"
+API_KEY = "farmerxential-secret-key-2024"
 HEADERS = {"X-API-Key": API_KEY}
 
 async def call_stats(client, call_number):
@@ -27,19 +27,17 @@ async def call_stats(client, call_number):
         }
 
 async def run_load_test():
-    print("Starting load test — 100 concurrent calls...")
+    print("Starting FarmerXential load test — 100 concurrent calls...")
     print("=" * 50)
 
     async with httpx.AsyncClient(timeout=30) as client:
         start_total = time.time()
 
-        # Fire 100 calls at the same time
         tasks = [call_stats(client, i+1) for i in range(100)]
         results = await asyncio.gather(*tasks)
 
         total_time = round((time.time() - start_total) * 1000, 1)
 
-    # Analyse results
     successful = [r for r in results if r["success"]]
     failed = [r for r in results if not r["success"]]
     durations = [r["duration_ms"] for r in successful]
@@ -62,7 +60,7 @@ async def run_load_test():
             print(f"  Call {f['call']}: {f.get('error', f['status'])}")
 
     if len(successful) == 100:
-        print("\n✅ PASSED — API handles 100 concurrent calls!")
+        print("\n✅ PASSED — FarmerXential API handles 100 concurrent calls!")
     elif len(successful) >= 90:
         print("\n⚠️ PARTIAL — API handles most calls but some failed")
     else:
