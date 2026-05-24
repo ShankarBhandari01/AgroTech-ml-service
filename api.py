@@ -13,14 +13,14 @@ from typing import Optional
 # ==============================
 # LOAD MODEL AND FEATURES
 # ==============================
-model = joblib.load("agroreach_model.pkl")
-features = joblib.load("agroreach_features.pkl")
-explainer = joblib.load("agroreach_shap_explainer.pkl")
+model = joblib.load("farmerxential_model.pkl")
+features = joblib.load("farmerxential_features.pkl")
+explainer = joblib.load("farmerxential_shap_explainer.pkl")
 
 # ==============================
 # DATABASE SETUP
 # ==============================
-DB_PATH = "agroreach.db"
+DB_PATH = "farmerxential.db"
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -37,7 +37,7 @@ def init_db():
 
     if not table_exists:
         print("Loading CSV data into database...")
-        df = pd.read_csv("agroreach_farmer_priority_output.csv")
+        df = pd.read_csv("farmerxential_farmer_priority_output.csv")
 
         zone_mapping = {
             0: "North Central", 1: "North East", 2: "North West",
@@ -65,7 +65,7 @@ async def lifespan(app: FastAPI):
 # ==============================
 # APP
 # ==============================
-app = FastAPI(title="AgroReach API", version="2.0", lifespan=lifespan)
+app = FastAPI(title="FarmerXential API", version="2.0", lifespan=lifespan)
 
 # ==============================
 # CORS
@@ -133,9 +133,10 @@ class FarmerUpdate(BaseModel):
 @app.get("/")
 def home():
     return {
-        "message": "AgroReach API is running!",
+        "message": "FarmerXential API is running!",
         "version": "2.0",
-        "status": "healthy"
+        "status": "healthy",
+        "product": "FarmerXential by Lalishank Holdings Limited"
     }
 
 # ==============================
