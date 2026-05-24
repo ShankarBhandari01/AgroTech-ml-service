@@ -31,36 +31,11 @@ def init_db():
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS farmers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            hhid INTEGER UNIQUE,
-            intervention_level INTEGER,
-            predicted_intervention_level INTEGER,
-            risk_score REAL,
-            yield_original REAL,
-            land_size_original REAL,
-            household_size INTEGER,
-            used_fertilizer INTEGER,
-            household_max_education INTEGER,
-            has_extension_access INTEGER,
-            shock_level INTEGER,
-            asset_score REAL,
-            postharvest_activity_score REAL,
-            crop_loss_risk_score REAL,
-            digital_access_score REAL,
-            market_access_score REAL,
-            transport_cost REAL,
-            received_credit INTEGER,
-            zone INTEGER,
-            priority_label TEXT,
-            zone_name TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+    table_exists = cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='farmers'"
+    ).fetchone()
 
-    count = cursor.execute("SELECT COUNT(*) FROM farmers").fetchone()[0]
-    if count == 0:
+    if not table_exists:
         print("Loading CSV data into database...")
         df = pd.read_csv("agroreach_farmer_priority_output.csv")
 
@@ -72,7 +47,8 @@ def init_db():
             0: "Low Priority", 1: "Medium Priority", 2: "High Priority"
         })
         df["zone_name"] = df["zone"].map(zone_mapping)
-        df.to_sql("farmers", conn, if_exists="append", index=False)
+
+        df.to_sql("farmers", conn, if_exists="replace", index=False)
         print(f"Loaded {len(df)} farmers into database!")
 
     conn.commit()
