@@ -53,6 +53,48 @@ class APIKey(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Integer, default=1)
 
+# ==============================
+# NEW: INTERVENTION TABLE
+# ==============================
+# Think of this like a "visit record" form.
+# Every time a field officer visits a farmer and helps them,
+# they fill this in. We store it here in PostgreSQL.
+# The farmer_id links back to the farmer in our CSV.
+# One farmer can have MANY interventions over time.
+class Intervention(Base):
+    __tablename__ = "interventions"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # Which farmer was helped — links to hhid in our CSV
+    farmer_id = Column(Integer, index=True)
+
+    # Who helped them — field officer's name
+    officer_name = Column(String)
+
+    # What type of help was given
+    # e.g. "fertilizer_support", "extension_visit", "credit_facilitation",
+    #      "seed_distribution", "training", "other"
+    intervention_type = Column(String)
+
+    # What was the result — did it help?
+    # e.g. "pending", "successful", "no_response", "follow_up_needed"
+    outcome = Column(String, default="pending")
+
+    # Any extra notes the officer wants to add
+    notes = Column(String, nullable=True)
+
+    # The farmer's risk score AT THE TIME of intervention
+    # Important — so we can track if it improves later
+    risk_score_at_intervention = Column(Float, nullable=True)
+
+    # When the intervention happened
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # When the outcome was last updated
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -136,7 +178,7 @@ def verify_api_key(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
     return api_key
 
 # ==============================
-# INPUT SCHEMA
+# INPUT SCHEMAS
 # ==============================
 class FarmerInput(BaseModel):
     yield_value: float
@@ -163,6 +205,22 @@ class FarmerInput(BaseModel):
     cultivates_crops: int
     received_credit: int
     head_gender: int
+
+# NEW: Schema for creating an intervention
+# Think of this like the fields on the form the field officer fills in
+class InterventionInput(BaseModel):
+    farmer_id: int                          # Which farmer (hhid)
+    officer_name: str                       # Field officer's name
+    intervention_type: str                  # Type of help given
+    notes: Optional[str] = None            # Extra notes (optional)
+    risk_score_at_intervention: Optional[float] = None  # Farmer's risk score now
+
+# NEW: Schema for updating an intervention outcome
+# After helping the farmer, officer comes back to say what happened
+class InterventionUpdate(BaseModel):
+    outcome: str                            # "successful", "no_response", "follow_up_needed"
+    notes: Optional[str] = None            # Updated notes
+
 
 # ==============================
 # HEALTH CHECK
@@ -317,7 +375,7 @@ def get_farmers(
     if priority is not None:
         df = df[df["predicted_intervention_level"] == priority]
 
-    df = df.sort_values("risk_score", ascending=False)
+    #df = df.sort_values("risk_score", ascending=False)
     total = len(df)
     df = df.iloc[offset:offset + limit]
 
@@ -487,4 +545,208 @@ def get_prediction_history(
             }
             for log in logs
         ]
+    }
+
+
+# ==============================
+# NEW: INTERVENTION ENDPOINTS
+# ==============================
+
+# --- Record a new intervention ---
+# This is called when a field officer visits a farmer and logs it
+@app.post("/interventions")
+@limiter.limit("30/minute")
+def create_intervention(
+    request: Request,
+    data: InterventionInput,
+    db: Session = Depends(get_db),
+    api_key: APIKey = Depends(verify_api_key)
+):
+    """
+    Record that a field officer visited and helped a farmer.
+    Think of it like: ticking off a farmer on the to-do list
+    and writing what you did.
+    """
+    # Create the new intervention record
+    intervention = Intervention(
+        farmer_id=data.farmer_id,
+        officer_name=data.officer_name,
+        intervention_type=data.intervention_type,
+        notes=data.notes,
+        risk_score_at_intervention=data.risk_score_at_intervention,
+        outcome="pending",                  # Always starts as pending
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow()
+    )
+
+    db.add(intervention)
+    db.commit()
+    db.refresh(intervention)               # Get the new ID back from PostgreSQL
+
+    return {
+        "message": "Intervention recorded successfully",
+        "intervention_id": intervention.id,
+        "farmer_id": intervention.farmer_id,
+        "officer_name": intervention.officer_name,
+        "intervention_type": intervention.intervention_type,
+        "outcome": intervention.outcome,
+        "created_at": intervention.created_at.isoformat()
+    }
+
+
+# --- Get all interventions for one specific farmer ---
+# Field officer or NDDC wants to see the full history for farmer 1234
+@app.get("/interventions/farmer/{farmer_id}")
+@limiter.limit("30/minute")
+def get_farmer_interventions(
+    request: Request,
+    farmer_id: int,
+    db: Session = Depends(get_db),
+    api_key: APIKey = Depends(verify_api_key)
+):
+    """
+    Get the full intervention history for one farmer.
+    Think of it like: opening a farmer's medical file and
+    reading all their past visits.
+    """
+    interventions = db.query(Intervention)\
+        .filter(Intervention.farmer_id == farmer_id)\
+        .order_by(Intervention.created_at.desc())\
+        .all()
+
+    return {
+        "farmer_id": farmer_id,
+        "total_interventions": len(interventions),
+        "interventions": [
+            {
+                "id": i.id,
+                "officer_name": i.officer_name,
+                "intervention_type": i.intervention_type,
+                "outcome": i.outcome,
+                "notes": i.notes,
+                "risk_score_at_intervention": i.risk_score_at_intervention,
+                "created_at": i.created_at.isoformat(),
+                "updated_at": i.updated_at.isoformat()
+            }
+            for i in interventions
+        ]
+    }
+
+
+# --- Get ALL interventions (for NDDC dashboard overview) ---
+# Government wants to see: how many farmers have been helped total?
+@app.get("/interventions")
+@limiter.limit("30/minute")
+def get_all_interventions(
+    request: Request,
+    outcome: Optional[str] = None,         # Filter by outcome e.g. "successful"
+    officer_name: Optional[str] = None,    # Filter by officer
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    api_key: APIKey = Depends(verify_api_key)
+):
+    """
+    Get all interventions across all farmers.
+    Think of it like: the full register of every visit ever made.
+    NDDC can use this to see the total impact at a glance.
+    """
+    query = db.query(Intervention)
+
+    # Apply filters if provided
+    if outcome:
+        query = query.filter(Intervention.outcome == outcome)
+    if officer_name:
+        query = query.filter(Intervention.officer_name == officer_name)
+
+    total = query.count()
+
+    interventions = query\
+        .order_by(Intervention.created_at.desc())\
+        .offset(offset)\
+        .limit(limit)\
+        .all()
+
+    # Summary counts — useful for NDDC dashboard
+    all_records = db.query(Intervention).all()
+    summary = {
+        "total": len(all_records),
+        "pending": sum(1 for i in all_records if i.outcome == "pending"),
+        "successful": sum(1 for i in all_records if i.outcome == "successful"),
+        "no_response": sum(1 for i in all_records if i.outcome == "no_response"),
+        "follow_up_needed": sum(1 for i in all_records if i.outcome == "follow_up_needed")
+    }
+
+    return {
+        "summary": summary,
+        "total_filtered": total,
+        "limit": limit,
+        "offset": offset,
+        "interventions": [
+            {
+                "id": i.id,
+                "farmer_id": i.farmer_id,
+                "officer_name": i.officer_name,
+                "intervention_type": i.intervention_type,
+                "outcome": i.outcome,
+                "notes": i.notes,
+                "risk_score_at_intervention": i.risk_score_at_intervention,
+                "created_at": i.created_at.isoformat(),
+                "updated_at": i.updated_at.isoformat()
+            }
+            for i in interventions
+        ]
+    }
+
+
+# --- Update intervention outcome ---
+# Officer comes back later: "I visited, here's what happened"
+@app.patch("/interventions/{intervention_id}")
+@limiter.limit("30/minute")
+def update_intervention(
+    request: Request,
+    intervention_id: int,
+    data: InterventionUpdate,
+    db: Session = Depends(get_db),
+    api_key: APIKey = Depends(verify_api_key)
+):
+    """
+    Update the outcome of an intervention.
+    Think of it like: going back to the register and writing
+    what happened after the visit.
+    """
+    # Find the intervention
+    intervention = db.query(Intervention)\
+        .filter(Intervention.id == intervention_id)\
+        .first()
+
+    if not intervention:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Intervention {intervention_id} not found."
+        )
+
+    # Valid outcomes only
+    valid_outcomes = ["pending", "successful", "no_response", "follow_up_needed"]
+    if data.outcome not in valid_outcomes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid outcome. Must be one of: {valid_outcomes}"
+        )
+
+    # Update the record
+    intervention.outcome = data.outcome
+    if data.notes:
+        intervention.notes = data.notes
+    intervention.updated_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(intervention)
+
+    return {
+        "message": "Intervention updated successfully",
+        "intervention_id": intervention.id,
+        "farmer_id": intervention.farmer_id,
+        "outcome": intervention.outcome,
+        "updated_at": intervention.updated_at.isoformat()
     }
