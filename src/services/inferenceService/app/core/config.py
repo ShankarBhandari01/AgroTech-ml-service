@@ -7,5 +7,6 @@ class Settings(BaseSettings):
     MODEL_NAME: str = "farmerXential_model"
     MODEL_ALIAS: str = "prod"
     USE_LOCAL_MODEL: bool = True
+    DATABASE_URL: str = "postgresql://postgres:password@localhost:5432/agrotech"
 
 settings = Settings()

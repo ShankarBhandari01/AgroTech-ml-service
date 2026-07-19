@@ -1,4 +1,5 @@
-from pydantic import BaseModel,Field
+from pydantic import BaseModel, Field
+from typing import Optional
 
 class PredictionRequest(BaseModel):
     yield_value: float
@@ -25,3 +26,8 @@ class PredictionRequest(BaseModel):
     cultivates_crops: int
     received_credit: int
     head_gender: int
+
+class FarmerPredictionRequest(BaseModel):
+    farmer_id: str
+    model_name: Optional[str] = "farmerXential_model"
+    model_alias: Optional[str] = "prod"
