@@ -17,6 +17,8 @@ processor = BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4318/
 provider.add_span_processor(processor)
 trace.set_tracer_provider(provider)
 
+
+
 app = FastAPI()
 FastAPIInstrumentor.instrument_app(app)
 
