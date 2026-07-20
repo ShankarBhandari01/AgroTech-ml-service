@@ -6,7 +6,6 @@
   <component name="ChangeListManager">
     <list default="true" id="0ea03c5d-11ae-4fd7-aed4-37b11cec194f" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/services/inferenceService/app/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/services/inferenceService/app/main.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -284,7 +283,7 @@
       <workItem from="1784480095911" duration="1385000" />
       <workItem from="1784482128557" duration="8000" />
       <workItem from="1784482156526" duration="8766000" />
-      <workItem from="1784494106568" duration="1009000" />
+      <workItem from="1784494106568" duration="2491000" />
     </task>
     <servers />
   </component>
