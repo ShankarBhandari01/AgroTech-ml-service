@@ -22,5 +22,11 @@ FEATURES = {
     "drought_risk": "int",
     "cultivates_crops": "int",
     "received_credit": "int",
-    "head_gender": "int"
+    "head_gender": "int",
+    # Sentinel-2 spectral indices as DIRECT model inputs (previously they only influenced the
+    # yield/asset proxies). Appended at the end so column order stays stable for the existing
+    # features; the model must be retrained (train_real_production_model.py) after this change.
+    "ndvi": "float",
+    "ndwi": "float",
+    "evi": "float"
 }
