@@ -1,3 +1,4 @@
+import functools
 from typing import Tuple, Dict, Any, List, Optional
 
 from src.services.inferenceService.app.feature_store.store import FeatureStore
@@ -21,6 +22,10 @@ import requests
 import pandas as pd
 import numpy as np
 import math
+
+# Open-Meteo is a free public API with no SLA. This is the budget the call gets before the
+# prediction falls back to its default microclimate metrics.
+OPEN_METEO_TIMEOUT_SECONDS = 4
 
 
 class PredictionsService:
@@ -76,7 +81,7 @@ class PredictionsService:
         
         return result
 
-    async def _fetch_microclimate_weather_data(self, lat: float, lon: float) -> dict:
+    async def _fetch_microclimate_weather_data(self, lat: Optional[float], lon: Optional[float]) -> dict:
         """
         Fetches 7-day hourly Open-Meteo weather telemetry to construct microclimate lag features:
         - Consecutive hours where RH >= 85%
@@ -102,7 +107,13 @@ class PredictionsService:
                 f"&hourly=temperature_2m,relative_humidity_2m,soil_moisture_0_to_7cm,rain"
                 f"&past_days=7&forecast_days=1&timezone=auto"
             )
-            res = await run_in_threadpool(requests.get, url, params={"timeout": 4})
+            # timeout is a requests kwarg, NOT a query parameter. Passed inside params= it was
+            # appended to the Open-Meteo URL as ?timeout=4 and the call had no timeout at all —
+            # a hung upstream would block this threadpool worker forever, and enough of them
+            # would stop the service answering anything, /health included.
+            res = await run_in_threadpool(
+                functools.partial(requests.get, url, timeout=OPEN_METEO_TIMEOUT_SECONDS)
+            )
             if res.status_code == 200:
                 hourly = res.json().get("hourly", {})
                 temps = hourly.get("temperature_2m", [])
@@ -159,7 +170,7 @@ class PredictionsService:
 
         return default_metrics
 
-    async def _resolve_spatiotemporal_indices(self, lat: float, lon: float, state: str) -> dict:
+    async def _resolve_spatiotemporal_indices(self, lat: Optional[float], lon: Optional[float], state: Optional[str] = None) -> dict:
         """
         Real Sentinel-2 spectral indices (NDVI/NDWI/EVI) via the CDSE Statistical API when
         credentials are configured and a cloud-free scene exists, otherwise the synthetic model.
@@ -179,7 +190,7 @@ class PredictionsService:
             }
         return self._synthetic_indices(lat, lon, state)
 
-    def _synthetic_indices(self, lat: float, lon: float, state: str) -> dict:
+    def _synthetic_indices(self, lat: Optional[float], lon: Optional[float], state: Optional[str] = None) -> dict:
         """
         Deterministic fallback spectral indices when real Sentinel-2 data isn't available. Kept as a
         graceful degradation path so inference never hard-fails on a missing scene / credentials.
@@ -208,14 +219,25 @@ class PredictionsService:
             return "Vegetation Degradation"
         return "Healthy Canopy"
 
+    @staticmethod
+    def _parse_farm_size(val: Any) -> float:
+        """
+        Parses farm_size attribute: handles float/int directly or string like "12 Hectares" / "12.5 ha".
+        """
+        if isinstance(val, (int, float)):
+            return float(val)
+        if isinstance(val, str) and val.strip():
+            try:
+                return float(val.strip().split(' ')[0])
+            except (ValueError, IndexError):
+                return 1.0
+        return 1.0
+
     def _map_features(self, result, weather: dict, indices: dict) -> Tuple[dict, str]:
         state_map = {"Kaduna": 1, "Kano": 2, "Lagos": 3}
         zone_id = state_map.get(result.state, 0)
         
-        try:
-            land_size = float(result.farm_size) if result.farm_size else 1.0
-        except ValueError:
-            land_size = 1.0
+        land_size = self._parse_farm_size(result.farm_size)
 
         is_cold_start = (result.yield_value is None and result.shock_level is None)
         mode = "GEOSPATIAL_COLDSTART_REMOTE_SENSING" if is_cold_start else "HYBRID_SURVEY_REMOTE_SENSING"
@@ -307,18 +329,18 @@ class PredictionsService:
         try:
             weather = await self._fetch_microclimate_weather_data(farmer_data.latitude, farmer_data.longitude)
             indices = await self._resolve_spatiotemporal_indices(farmer_data.latitude, farmer_data.longitude, farmer_data.state)
-            
             payload_dict, inference_mode = self._map_features(farmer_data, weather, indices)
 
-            # 1. Execute Cross-Attention Fusion
-            spatial_vector = np.array([indices["ndvi"], indices["ndwi"], indices["evi"], float(farmer_data.farm_size or 1.0)])
+
+            #  Execute Cross-Attention Fusion
+            spatial_vector = np.array([indices["ndvi"], indices["ndwi"], indices["evi"], payload_dict["land_size"]])
             temporal_seq = weather["hourly_sequence"]
             
             fused_representation, attn_weights = self.cross_attention_layer.forward(spatial_vector, temporal_seq)
             fusion_score = round(float(np.mean(fused_representation)), 4)
             peak_incubation_hour = int(np.argmax(attn_weights[0])) if attn_weights is not None and attn_weights.shape[1] > 0 else 0
 
-            # 2. Build DataFrame for ML model
+            # Build DataFrame for ML model
             df = self.features.build_features(payload_dict)
 
             # 3. Run Scikit-Learn / XGBoost Prediction

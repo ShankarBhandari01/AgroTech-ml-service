@@ -1,0 +1,19 @@
+# Mirrors .dockerignore. Written explicitly because gcloud otherwise generates one from
+# .gitignore, which excludes `venv/` but not `.venv/` — a 1 GB upload on every build.
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+
+.git/
+.gitignore
+.idea/
+.DS_Store
+.env
+
+mlruns/
+mlflow.db
+*.csv
+farmerxential_features.pkl
+farmerxential_shap_explainer.pkl
