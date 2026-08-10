@@ -8,8 +8,8 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-from src.services.inferenceService.app.api.crop_health import router as crop_health_router
-from src.services.inferenceService.app.api.predict import router as predict_router
+from argotech.serving.api.crop_health import router as crop_health_router
+from argotech.serving.api.predict import router as predict_router
 
 # Set up OpenTelemetry Tracing. The exporter is opt-in via OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:
 # no collector runs alongside the deployed compose stack, and an unconditional exporter pointed at
@@ -24,22 +24,13 @@ trace.set_tracer_provider(provider)
 
 
 
-app = FastAPI()
+app = FastAPI(title="AgroTech AI", version="0.2.0")
 FastAPIInstrumentor.instrument_app(app)
 
 app.include_router(predict_router)
 app.include_router(crop_health_router)
 
 
-@app.on_event("startup")
-def startup_event():
-    print("Server is starting...")
-
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
-
-@app.on_event("shutdown")
-def shutdown_event():
-    print("Server is shutting down...")

@@ -8,3 +8,10 @@ __pycache__/
 
 # IDE state. .idea/ is already partly tracked; new per-user files should not be.
 .idea/workspace.xml
+
+# Local MLflow experiment state.
+mlruns/
+mlflow.db
+
+# Editable-install metadata.
+*.egg-info/

@@ -4,7 +4,7 @@ import mlflow.pyfunc
 import pandas as pd
 import os
 
-from src.services.inferenceService.app.core.config import settings
+from argotech.config import settings
 
 
 class ModelManager:

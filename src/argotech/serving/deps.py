@@ -1,4 +1,4 @@
-from src.services.inferenceService.app.core.container import model_manager, feature_store
+from argotech.serving.container import model_manager, feature_store
 
 
 def get_model_manager():

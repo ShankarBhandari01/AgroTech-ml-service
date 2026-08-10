@@ -2,27 +2,17 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from types import SimpleNamespace
 
-from src.services.inferenceService.app.schemas.request import (
-    PredictionRequest, 
+from argotech.serving.schemas.request import (
     FarmerPredictionRequest, 
     CoordinatesColdStartPredictionRequest
 )
-from src.services.inferenceService.app.schemas.response import PredictionResponse
-from src.services.inferenceService.app.dependencies import get_model_manager, get_feature_store
-from src.services.inferenceService.app.core.model_manager import ModelManager
-from src.services.inferenceService.app.core.database import get_db
-from src.services.inferenceService.app.service.PredictionsService import PredictionsService
+from argotech.serving.schemas.response import PredictionResponse
+from argotech.serving.deps import get_model_manager, get_feature_store
+from argotech.models.registry import ModelManager
+from argotech.data.db import get_db
+from argotech.serving.pipeline import PredictionsService
 
 router = APIRouter()
-
-
-@router.post("/predict", response_model=PredictionResponse)
-async def predict(
-        payload: PredictionRequest,
-        model_manager: ModelManager = Depends(get_model_manager),
-        features=Depends(get_feature_store)
-):
-    raise HTTPException(status_code=400, detail="Use /predict/farmer or /predict/coldstart for inference.")
 
 
 @router.post("/predict/farmer", response_model=PredictionResponse)

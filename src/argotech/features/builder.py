@@ -1,5 +1,5 @@
 import pandas as pd
-from src.services.inferenceService.app.feature_store.features import FEATURES
+from argotech.features.schema import FEATURES
 
 class FeatureStore:
 

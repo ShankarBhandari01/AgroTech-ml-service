@@ -8,8 +8,8 @@ from typing import Tuple, List, Dict
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import classification_report, roc_auc_score, f1_score, precision_score, recall_score
 
-from src.services.inferenceService.app.feature_store.features import FEATURES
-from src.services.inferenceService.app.models.powerful_model import HybridSpatiotemporalEnsemble
+from argotech.features.schema import FEATURES
+from argotech.models.ensemble import HybridSpatiotemporalEnsemble
 
 
 class ProductionAfricanGeospatialDatasetBuilder:

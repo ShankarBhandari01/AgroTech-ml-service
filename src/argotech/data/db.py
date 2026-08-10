@@ -1,7 +1,7 @@
 import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
-from src.services.inferenceService.app.core.config import settings
+from argotech.config import settings
 
 DATABASE_URL = settings.DATABASE_URL
 # Handle possible Railway postgres protocol variation

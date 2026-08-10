@@ -1,12 +1,12 @@
 import functools
 from typing import Tuple, Dict, Any, List, Optional
 
-from src.services.inferenceService.app.feature_store.store import FeatureStore
-from src.services.inferenceService.app.schemas.request import FarmerPredictionRequest
-from src.services.inferenceService.app.core.model_manager import ModelManager
-from src.services.inferenceService.app.models.cross_attention_fusion import CrossAttentionFusionLayer
-from src.services.inferenceService.app.service.sentinel_client import sentinel_client
-from src.services.inferenceService.app.schemas.response import (
+from argotech.features.builder import FeatureStore
+from argotech.serving.schemas.request import FarmerPredictionRequest
+from argotech.models.registry import ModelManager
+from argotech.models.fusion import CrossAttentionFusionLayer
+from argotech.data.sentinel import sentinel_client
+from argotech.serving.schemas.response import (
     PredictionResponse, 
     PredictionProbabilities,
     InferenceDetail,
@@ -156,6 +156,12 @@ class PredictionsService:
                     val_end = soil_m[-1] if soil_m[-1] is not None else 0.0
                     soil_deficit = max(0.0, val_start - val_end)
 
+                # ponytail: `rainfall_anomaly` here is raw 8-day rainfall (0-60 mm), while the
+                # training set builds it as `six_month_total - 450` (-450 to +400). Same column
+                # name, incompatible distributions — the single worst train/serve skew in the
+                # service. Not fixed in place because correcting the serving side alone shifts
+                # the input distribution under an un-retrained model; fix it together with the
+                # retrain (docs/model-design.md, P0-1).
                 return {
                     "rainfall_anomaly": round(total_rain, 2),
                     "drought_risk": drought_risk,

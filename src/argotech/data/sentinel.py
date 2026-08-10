@@ -19,7 +19,7 @@ from datetime import date, timedelta
 
 import requests
 
-from src.services.inferenceService.app.core.config import settings
+from argotech.config import settings
 
 # Aggregated NDVI / NDWI / EVI over the AOI. dataMask output lets the Statistical API exclude
 # no-data/cloud-masked pixels from the mean. EVI uses the blue band (B02) per the standard formula.
@@ -77,13 +77,28 @@ class SentinelClient:
 
     def fetch_indices(self, lat, lon) -> dict | None:
         """Mean NDVI/NDWI/EVI at (lat, lon) over the last ~30 days, or None if unavailable."""
+        for obs in reversed(self._stats(lat, lon, days=30, interval="P30D")):
+            return obs  # already filtered to intervals with valid stats
+        return None
+
+    def fetch_history(self, lat, lon, days: int = 365) -> list[dict]:
+        """Monthly index observations for the last `days`, oldest first.
+
+        This is what turns a raw NDVI into a meaningful one: VCI and the peer anomaly in
+        `domain.indices` both need a reference distribution, and one extra Statistical API call
+        buys the field's own 12-month history instead of a hard-coded regional prior.
+        """
+        return self._stats(lat, lon, days=days, interval="P30D")
+
+    def _stats(self, lat, lon, days: int, interval: str) -> list[dict]:
+        """Aggregated index statistics per interval, oldest first. Empty list on any failure."""
         if not self.enabled or lat is None or lon is None:
-            return None
+            return []
         try:
             token = self._access_token()
             d = 0.005  # ~500 m AOI half-width
             end = date.today()
-            start = end - timedelta(days=30)
+            start = end - timedelta(days=days)
             body = {
                 "input": {
                     "bounds": {
@@ -94,7 +109,7 @@ class SentinelClient:
                 },
                 "aggregation": {
                     "timeRange": {"from": f"{start}T00:00:00Z", "to": f"{end}T23:59:59Z"},
-                    "aggregationInterval": {"of": "P30D"},
+                    "aggregationInterval": {"of": interval},
                     "evalscript": _EVALSCRIPT,
                     "resx": 10,
                     "resy": 10,
@@ -107,24 +122,24 @@ class SentinelClient:
                 timeout=15,
             )
             resp.raise_for_status()
-            intervals = resp.json().get("data", [])
-            # Most recent interval that actually has valid stats (skip fully cloud-masked windows).
-            for interval in reversed(intervals):
-                outputs = interval.get("outputs", {})
+            out = []
+            # Keep only intervals that actually have valid stats (skip fully cloud-masked windows).
+            for iv in resp.json().get("data", []):
+                outputs = iv.get("outputs", {})
                 ndvi = self._mean(outputs, "ndvi")
                 ndwi = self._mean(outputs, "ndwi")
                 evi = self._mean(outputs, "evi")
                 if ndvi is not None and ndwi is not None and evi is not None:
-                    return {
+                    out.append({
                         "ndvi": ndvi,
                         "ndwi": ndwi,
                         "evi": evi,
-                        "sensing_date": str(interval.get("interval", {}).get("to", ""))[:10],
-                    }
-            return None
+                        "sensing_date": str(iv.get("interval", {}).get("to", ""))[:10],
+                    })
+            return out
         except Exception as e:  # noqa: BLE001 — any failure degrades to synthetic, never breaks inference
-            print(f"[SentinelClient] fetch_indices failed: {e}")
-            return None
+            print(f"[SentinelClient] statistics query failed: {e}")
+            return []
 
     @staticmethod
     def _mean(outputs: dict, key: str):

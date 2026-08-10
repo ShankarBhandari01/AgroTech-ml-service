@@ -8,26 +8,21 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# CPU-only torch, from PyTorch's index rather than PyPI: the default linux wheel depends on the
-# whole nvidia-* CUDA stack (~2.5 GB) for a VM that has no GPU. Installed before requirements.txt
-# so the plain `torch` line there resolves to this build.
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
+# Dependency layer first, so it only rebuilds when the pins actually change. The torch install that
+# used to sit here is gone: the PyTorch fusion layer was never instantiated.
+COPY pyproject.toml .
+RUN mkdir -p src/argotech && touch src/argotech/__init__.py && pip install --no-cache-dir .
 
-# Requirements second, so the dependency layer only rebuilds when they actually change.
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# model_manager.py loads these by bare relative path ("farmerxential_model.pkl"), so they must
-# land in the working directory, not alongside the source. Both names are copied because
-# MODEL_NAME picks between them at runtime.
+# models/registry.py loads these by bare relative path, so they must land in the working directory.
+# ponytail: baked into the image, which is why a model update needs a rebuild. Pull from GCS at
+# startup once models ship more often than code.
 COPY farmerxential_model.pkl farmerxential_powerful_model.pkl ./
 COPY src src
+RUN pip install --no-cache-dir --no-deps .
 
 RUN useradd --system --create-home ml
 USER ml
 
 EXPOSE 8000
 
-# Procfile's uvicorn line, with the port fixed rather than read from $PORT — compose talks to
-# this over the internal network on a known port, there is no PaaS assigning one.
-CMD ["uvicorn", "src.services.inferenceService.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "argotech.serving.main:app", "--host", "0.0.0.0", "--port", "8000"]
