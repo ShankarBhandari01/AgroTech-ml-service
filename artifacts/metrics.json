@@ -1,0 +1,131 @@
+{
+  "spatial_blocked": [
+    {
+      "split": "held-out cluster: Benue_River_Basin",
+      "n": 576,
+      "macro_f1": 0.396,
+      "balanced_accuracy": 0.3954,
+      "ece": 0.0405,
+      "precision_at_10": 0.8,
+      "precision_at_25": 0.68,
+      "precision_at_50": 0.52,
+      "baseline_majority_f1": 0.2716,
+      "baseline_persistence_f1": 0.4172,
+      "baseline_persistence_p25": 0.4
+    },
+    {
+      "split": "held-out cluster: Kaduna_Grain_Belt",
+      "n": 1138,
+      "macro_f1": 0.4793,
+      "balanced_accuracy": 0.4883,
+      "ece": 0.0854,
+      "precision_at_10": 0.7,
+      "precision_at_25": 0.84,
+      "precision_at_50": 0.88,
+      "baseline_majority_f1": 0.2559,
+      "baseline_persistence_f1": 0.5302,
+      "baseline_persistence_p25": 0.6
+    },
+    {
+      "split": "held-out cluster: Kano_Sudan_Savannah",
+      "n": 1189,
+      "macro_f1": 0.4095,
+      "balanced_accuracy": 0.414,
+      "ece": 0.0801,
+      "precision_at_10": 0.7,
+      "precision_at_25": 0.64,
+      "precision_at_50": 0.48,
+      "baseline_majority_f1": 0.2764,
+      "baseline_persistence_f1": 0.5589,
+      "baseline_persistence_p25": 0.84
+    },
+    {
+      "split": "held-out cluster: Tanzania_Morogoro",
+      "n": 1312,
+      "macro_f1": 0.342,
+      "balanced_accuracy": 0.3397,
+      "ece": 0.0538,
+      "precision_at_10": 0.2,
+      "precision_at_25": 0.4,
+      "precision_at_50": 0.4,
+      "baseline_majority_f1": 0.2788,
+      "baseline_persistence_f1": 0.3659,
+      "baseline_persistence_p25": 0.48
+    }
+  ],
+  "temporal_forward": [
+    {
+      "split": "train < 2024-10-29, test 2024-10-29..",
+      "n": 89,
+      "macro_f1": 0.5412,
+      "balanced_accuracy": 0.6207,
+      "ece": 0.1787,
+      "precision_at_10": 0.7,
+      "precision_at_25": 0.56,
+      "precision_at_50": 0.42,
+      "baseline_majority_f1": 0.2789,
+      "baseline_persistence_f1": 0.4774,
+      "baseline_persistence_p25": 0.48
+    },
+    {
+      "split": "train < 2025-03-29, test 2025-03-29..",
+      "n": 94,
+      "macro_f1": 0.3791,
+      "balanced_accuracy": 0.3777,
+      "ece": 0.0872,
+      "precision_at_10": 0.4,
+      "precision_at_25": 0.4,
+      "precision_at_50": 0.4,
+      "baseline_majority_f1": 0.2675,
+      "baseline_persistence_f1": 0.4109,
+      "baseline_persistence_p25": 0.52
+    },
+    {
+      "split": "train < 2025-09-24, test 2025-09-24..",
+      "n": 72,
+      "macro_f1": 0.3803,
+      "balanced_accuracy": 0.3672,
+      "ece": 0.0775,
+      "precision_at_10": 0.7,
+      "precision_at_25": 0.36,
+      "precision_at_50": 0.32,
+      "baseline_majority_f1": 0.27,
+      "baseline_persistence_f1": 0.2969,
+      "baseline_persistence_p25": 0.48
+    }
+  ],
+  "permutation_importance": {
+    "ndvi_z_peer": 0.0217,
+    "ndmi": 0.0029,
+    "ndvi": 0.0025,
+    "rain_anomaly_30": 0.0019,
+    "radiation_90": 0.0016,
+    "dry_spell_30": 0.0015,
+    "tmax_mean_30": 0.0014,
+    "elevation": 0.0012,
+    "et0_90": 0.0009,
+    "rain_30": 0.0008,
+    "evi": 0.0008,
+    "water_deficit_30": 0.0007,
+    "rh_mean_30": 0.0006,
+    "heat_stress_days": 0.0,
+    "latitude": 0.0,
+    "longitude": 0.0,
+    "stage_kc": -0.0001,
+    "dry_spell_90": -0.0002,
+    "days_since_onset": -0.0004,
+    "tmin_mean_30": -0.0005,
+    "water_satisfaction_30": -0.0007,
+    "gdd_since_onset": -0.0012,
+    "rain_90": -0.0035,
+    "diurnal_range_30": -0.0114,
+    "gdd_90": -0.0117,
+    "vci": -0.0184
+  },
+  "n_samples": 4215,
+  "class_balance": {
+    "0": 0.6856,
+    "1": 0.1874,
+    "2": 0.1269
+  }
+}

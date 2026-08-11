@@ -7,7 +7,7 @@ from argotech.serving.schemas.request import (
     CoordinatesColdStartPredictionRequest
 )
 from argotech.serving.schemas.response import PredictionResponse
-from argotech.serving.deps import get_model_manager, get_feature_store
+from argotech.serving.deps import get_model_manager
 from argotech.models.registry import ModelManager
 from argotech.data.db import get_db
 from argotech.serving.pipeline import PredictionsService
@@ -19,12 +19,10 @@ router = APIRouter()
 async def predict_farmer(
         payload: FarmerPredictionRequest,
         model_manager: ModelManager = Depends(get_model_manager),
-        features=Depends(get_feature_store),
         db: Session = Depends(get_db)
 ):
     try:
         predictions_service = PredictionsService(
-            features=features,
             model_manager=model_manager,
             data=payload,
             db=db
@@ -42,7 +40,6 @@ async def predict_farmer(
 async def predict_coldstart(
         payload: CoordinatesColdStartPredictionRequest,
         model_manager: ModelManager = Depends(get_model_manager),
-        features=Depends(get_feature_store),
         db: Session = Depends(get_db)
 ):
     """
@@ -58,7 +55,6 @@ async def predict_coldstart(
         )
         
         predictions_service = PredictionsService(
-            features=features,
             model_manager=model_manager,
             data=farmer_req,
             db=db

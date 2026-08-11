@@ -81,16 +81,16 @@ class SentinelClient:
             return obs  # already filtered to intervals with valid stats
         return None
 
-    def fetch_history(self, lat, lon, days: int = 365) -> list[dict]:
+    def fetch_history(self, lat, lon, days: int = 365, res_m: int = 10) -> list[dict]:
         """Monthly index observations for the last `days`, oldest first.
 
         This is what turns a raw NDVI into a meaningful one: VCI and the peer anomaly in
         `domain.indices` both need a reference distribution, and one extra Statistical API call
         buys the field's own 12-month history instead of a hard-coded regional prior.
         """
-        return self._stats(lat, lon, days=days, interval="P30D")
+        return self._stats(lat, lon, days=days, interval="P30D", res_m=res_m)
 
-    def _stats(self, lat, lon, days: int, interval: str) -> list[dict]:
+    def _stats(self, lat, lon, days: int, interval: str, res_m: int = 10) -> list[dict]:
         """Aggregated index statistics per interval, oldest first. Empty list on any failure."""
         if not self.enabled or lat is None or lon is None:
             return []
@@ -111,8 +111,8 @@ class SentinelClient:
                     "timeRange": {"from": f"{start}T00:00:00Z", "to": f"{end}T23:59:59Z"},
                     "aggregationInterval": {"of": interval},
                     "evalscript": _EVALSCRIPT,
-                    "resx": 10,
-                    "resy": 10,
+                    "resx": res_m,
+                    "resy": res_m,
                 },
             }
             resp = requests.post(

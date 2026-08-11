@@ -15,3 +15,10 @@ mlflow.db
 
 # Editable-install metadata.
 *.egg-info/
+
+# Cached upstream responses and built datasets.
+.cache/
+/data/
+
+# Editor/hook scratch files.
+.claude/*.tmp.*

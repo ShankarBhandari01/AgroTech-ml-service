@@ -8,11 +8,9 @@ version = "0.2.0"
 description = "AgroTech agronomic risk and crop health inference service"
 requires-python = ">=3.11"
 
-# Pinned to the versions the .pkl models were trained with. Unpinned, the image picked up
-# scikit-learn 1.9.0 / numpy 2.4.6 and joblib.load died with "ModuleNotFoundError: No module named
-# '_loss'" — a pickle carries references to the exact internal module layout of the scikit-learn
-# that wrote it. Retrain and bump both together, never one alone. The medium-term fix is to stop
-# shipping pickles at all: see docs/model-design.md, "artifact format".
+# scikit-learn stays pinned because the model artifact is still a joblib pickle, which binds to
+# scikit-learn's exact internal module layout. Retrain and bump together, never one alone. Exporting
+# to ONNX removes the pin entirely — see docs/model-design.md §7, "artifact format".
 dependencies = [
   "fastapi",
   "uvicorn",
@@ -25,17 +23,14 @@ dependencies = [
   "scikit-learn==1.6.1",
   "numpy==2.0.2",
   "joblib==1.5.3",
-  "xgboost==2.1.4",
-  "mlflow",
   "opentelemetry-sdk==1.41.1",
   "opentelemetry-exporter-otlp-proto-http==1.41.1",
   "opentelemetry-instrumentation-fastapi==0.62b1",
 ]
 
 [project.optional-dependencies]
-# Training-only. `shap` was imported by the training scripts but absent from requirements.txt, so a
-# clean venv could not run them.
-train = ["shap", "matplotlib", "pyarrow"]
+# Training-only.
+train = ["pyarrow"]   # parquet for the built training set
 dev = ["pytest", "ruff"]
 
 [tool.setuptools.packages.find]

@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     MODEL_NAME: str = "farmerXential_model"
     MODEL_ALIAS: str = "prod"
     USE_LOCAL_MODEL: bool = True
+    AGRONOMIC_MODEL_PATH: str = "artifacts/agronomic_risk.joblib"
     DATABASE_URL: str = "postgresql://postgres:password@localhost:5432/agrotech"
 
     # Copernicus Data Space Ecosystem (CDSE) Sentinel Hub — real spectral indices for coldstart

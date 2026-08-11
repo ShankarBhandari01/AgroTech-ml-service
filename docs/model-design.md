@@ -437,8 +437,89 @@ boundaries so peer cohorts become spatial rather than temporal. Drift monitoring
 
 ---
 
-## 9. Implemented in this branch
+## 9. Retraining results
 
+The model was rebuilt on real data (`argotech.training.dataset` → `argotech.training.train`) and
+evaluated under the protocol in §6. The headline is that the numbers are now *low and meaningful*
+instead of high and circular.
+
+**Dataset** — 4 215 samples, 108 sites, 4 clusters, 2022-09-10 … 2026-06-22. Features: ERA5 daily
+reanalysis over the preceding 90 days passed through `argotech.domain`, plus the Sentinel-2 canopy
+state. Label: peer-standardised NDVI anomaly one 30-day interval ahead. Class balance 68.6 / 18.7 /
+12.7 %.
+
+### Spatially blocked (leave-one-cluster-out)
+
+| Held-out cluster | n | macro F1 | bal. acc | ECE | P@25 | majority F1 | persistence F1 | persistence P@25 |
+|---|---|---|---|---|---|---|---|---|
+| Benue_River_Basin | 576 | 0.396 | 0.395 | 0.041 | 0.680 | 0.272 | **0.417** | 0.400 |
+| Kaduna_Grain_Belt | 1138 | 0.479 | 0.488 | 0.085 | 0.840 | 0.256 | **0.530** | 0.600 |
+| Kano_Sudan_Savannah | 1189 | 0.409 | 0.414 | 0.080 | 0.640 | 0.276 | **0.559** | **0.840** |
+| Tanzania_Morogoro | 1312 | 0.342 | 0.340 | 0.054 | 0.400 | 0.279 | **0.366** | **0.480** |
+
+### Forward-chaining temporal
+
+| Split | n | macro F1 | bal. acc | ECE | P@25 | majority F1 | persistence F1 | persistence P@25 |
+|---|---|---|---|---|---|---|---|---|
+| train < 2024-10-29 | 89 | **0.541** | 0.621 | 0.179 | **0.560** | 0.279 | 0.477 | 0.480 |
+| train < 2025-03-29 | 94 | 0.379 | 0.378 | 0.087 | 0.400 | 0.268 | **0.411** | **0.520** |
+| train < 2025-09-24 | 72 | **0.380** | 0.367 | 0.077 | 0.360 | 0.270 | 0.297 | **0.480** |
+
+### What this says
+
+1. **The model beats the majority-class baseline everywhere** — 0.34-0.48 macro F1 against
+   0.26-0.28. It has learned something.
+2. **It does not beat persistence on macro F1 in any spatial fold**, and splits the temporal folds.
+   On ranking (P@25) it is slightly ahead spatially (mean 0.64 vs 0.58) and slightly behind
+   temporally (0.44 vs 0.49). Within the noise of 4 folds, *it is not yet distinguishable from
+   carrying today's anomaly forward*.
+3. **Calibration is genuinely good** — ECE 0.04-0.09 on blocked splits. This is what the calibration
+   layer was supposed to deliver and did not, when it was fitted on its own training data.
+4. **Permutation importance on held-out ground is decisive**: `ndvi_z_peer` at +0.022, everything
+   else below +0.003. The weather block contributes almost nothing beyond the current canopy
+   anomaly. The model is, in effect, a smoothed persistence model.
+
+### Why the weather features are inert, and what would change it
+
+- **Label.** A peer-relative NDVI level 30 days out is dominated by *persistent* field-level
+  differences — soil, land use, management — not by one month of weather. The fix is a label that
+  isolates the change (Δ anomaly) or, better, a real outcome: T1 confirmed events and T2 harvest
+  yields. That is the phase-2 work, and this result is the quantitative argument for it.
+- **Resolution.** ERA5 is a ~9-25 km grid. Sites inside one cluster frequently share a grid cell, so
+  the weather features barely vary across the cohort and cannot explain within-cohort divergence.
+  Higher-resolution precipitation (CHIRPS at 5 km, IMERG at 10 km) and satellite soil moisture
+  (SMAP) would give the features something to say.
+- **Cloud gaps.** A "30 days ahead" label is sometimes 60 days ahead, because the intervening
+  Sentinel-2 window was fully clouded. This is finding P2-13 measured: 113 of 192 sites survived, and
+  the gaps cluster in the rainy season. Sentinel-1 SAR is the fix.
+- **Scale.** 4 215 samples over 108 sites is small, and the temporal folds are 72-94 samples each.
+
+### Decision
+
+The retrained model **ships as the vegetation-hazard term** in the `domain.risk` composition, not as
+the risk score. That is the right role for it on this evidence: it is well calibrated, so it supplies
+a probability the composition needs and a threshold rule cannot, while the drought, disease and heat
+terms — which are physics and need no training data — carry the rest. It should not be promoted to
+the primary signal until it separates from persistence on a fold-by-fold basis.
+
+This is the release gate from §6 doing its job, in the opposite direction from the usual: the honest
+outcome of a retrain can be "the learned component earns a supporting role, not the lead".
+
+---
+
+## 10. Implemented in this branch
+
+- **Retrained model** — `argotech/training/dataset.py` rebuilt from scratch: real ERA5 + Sentinel-2,
+  90-day feature window, 30-day-ahead peer-standardised label, documented leakage controls.
+  `argotech/training/train.py` implements the §6 protocol (spatially blocked, forward-chaining,
+  baselines, permutation importance on held-out ground, ECE, precision@k). Results in §9.
+- `argotech/data/meteo.py` — one Open-Meteo client for both paths (ERA5 archive for training,
+  forecast for serving), same daily variables, disk-cached, with backoff.
+- `argotech/features/agronomic.py` — **the single feature builder**, called by both training and
+  serving. A feature cannot mean two things if it is defined once.
+- `argotech/serving/pipeline.py` — rewritten: builds the row with that shared builder, feeds the
+  learned model in as the vegetation-hazard term, and returns the decomposed
+  Hazard/Exposure/Vulnerability assessment alongside the Crop Health Index and real phenology.
 - `argotech/domain/indices.py` — spectral indices (incl. NDRE, SAVI), anomaly z-score, VCI, and the
   explainable Crop Health Index.
 - `argotech/domain/agronomy.py` — GDD with upper cutoff, crop-specific phenology staging, FAO-56
@@ -456,5 +537,8 @@ boundaries so peer cohorts become spatial rather than temporal. Drift monitoring
 - Repository restructured to the layout in §7; `torch` dropped (the PyTorch fusion layer was never
   instantiated); dependencies consolidated into `pyproject.toml`; dead `POST /predict` route and
   deprecated `on_event` handlers removed.
-- The `rainfall_anomaly` skew is marked at the call site rather than patched — correcting the serving
-  side alone would shift the input distribution under a model that has not been retrained.
+- The `rainfall_anomaly` train/serve skew is **resolved**, not annotated: `rain_anomaly_30` is now
+  observed 30-day rainfall minus the site's own climatological normal for the same calendar window,
+  computed by the same code in both paths.
+- `torch` dropped; dead `POST /predict` route and deprecated `on_event` handlers removed;
+  dependencies consolidated into `pyproject.toml`.

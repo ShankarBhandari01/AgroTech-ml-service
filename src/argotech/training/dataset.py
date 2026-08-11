@@ -1,225 +1,228 @@
-import os
-import requests
-import numpy as np
+"""Build a real, non-circular training set for the agronomic risk model.
+
+What changed and why
+--------------------
+The previous builder synthesised 20 of its 24 features with `np.random` and then derived the label
+from an `if/else` over the other four. The model could only ever recover the rule it was handed.
+
+This builder uses only measurements:
+
+* **Features** — ERA5 daily reanalysis over the 90 days *before* the prediction date, passed through
+  `argotech.domain` (thermal time, season onset, FAO-56 water balance, dry spells, heat stress), plus
+  the Sentinel-2 canopy state on the prediction date.
+* **Label** — the Sentinel-2 NDVI anomaly *30 days after* the prediction date, standardised against
+  the concurrent cohort of sites in the same farming cluster.
+
+The label is a future satellite observation of a different field-state than the features describe,
+so there is no path by which a feature determines its own target. The task is genuinely hard, and
+the honest consequence is that the reported scores are far below the previous pipeline's ~0.99.
+
+Leakage control
+---------------
+* Features come strictly from `t - 90 … t`; the label strictly from `t + 30`.
+* VCI uses only this site's observations *before* `t`.
+* The peer z-score is cross-sectional — computed against other sites' observations in the *same*
+  interval — so it needs no historical baseline that could carry future information.
+* The rainfall climatology used for `rain_anomaly_30` excludes the sample's own year.
+
+Run: `python -m argotech.training.dataset --sites 30 --years 4`
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import statistics
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, timedelta
+from pathlib import Path
+
 import pandas as pd
-import joblib
-import shap
-from typing import Tuple, List, Dict
-from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import classification_report, roc_auc_score, f1_score, precision_score, recall_score
 
-from argotech.features.schema import FEATURES
-from argotech.models.ensemble import HybridSpatiotemporalEnsemble
+from argotech.data import meteo
+from argotech.data.sentinel import sentinel_client
+from argotech.features.agronomic import FEATURE_COLUMNS, WINDOW_DAYS, build, satellite_block
 
+# Real Sub-Saharan farming zones. Each spans >100 km so that rainfall genuinely varies within a
+# cluster — a cohort whose members all share one weather cell would make the peer label unlearnable.
+CLUSTERS = [
+    {"name": "Kaduna_Grain_Belt",   "lat": (10.2, 11.5), "lon": (7.3, 8.5)},
+    {"name": "Kano_Sudan_Savannah", "lat": (11.5, 12.6), "lon": (8.0, 9.2)},
+    {"name": "Benue_River_Basin",   "lat": (7.0, 8.1),   "lon": (8.2, 9.4)},
+    {"name": "Kenya_Rift_Valley",   "lat": (-0.2, 1.2),  "lon": (34.8, 36.1)},
+    {"name": "Ethiopian_Highlands", "lat": (8.3, 9.9),   "lon": (38.0, 39.6)},
+    {"name": "Tanzania_Morogoro",   "lat": (-8.0, -6.5), "lon": (36.4, 37.8)},
+]
 
-class ProductionAfricanGeospatialDatasetBuilder:
-    """
-    Ingests and merges real-world public geospatial & microclimate datasets for Sub-Saharan Africa:
-    1. Open-Meteo ERA5 10-Year Climate Reanalysis Telemetry
-    2. Sentinel-2 L2A Multi-Spectral Canopy Indices (NDVI, NDWI, EVI)
-    3. FAO WaPOR Water Productivity & Biomass Signals
-    4. World Bank LSMS-ISA Agricultural Survey Baselines
-    """
-    def __init__(self):
-        self.feature_list = list(FEATURES.keys())
+LABEL_HORIZON_INTERVALS = 1     # one P30D bucket ahead
+SEVERE_Z, ELEVATED_Z = -1.0, -0.35
 
-    def fetch_open_meteo_historical_era5(self, lat: float, lon: float, year: int = 2024) -> Dict[str, float]:
-        """
-        Fetches historical ERA5 climate reanalysis logs for a specific African Lat/Lon coordinate.
-        """
-        try:
-            url = (
-                f"https://archive-api.open-meteo.com/v1/archive?"
-                f"latitude={lat}&longitude={lon}"
-                f"&start_date={year}-05-01&end_date={year}-10-31"
-                f"&hourly=temperature_2m,relative_humidity_2m,soil_moisture_0_to_7cm,rain"
-                f"&timezone=auto"
-            )
-            res = requests.get(url, timeout=5)
-            if res.status_code == 200:
-                hourly = res.json().get("hourly", {})
-                temps = hourly.get("temperature_2m", [])
-                rhs = hourly.get("relative_humidity_2m", [])
-                soil_m = hourly.get("soil_moisture_0_to_7cm", [])
-                rains = hourly.get("rain", [])
-
-                max_rh_hrs = 0
-                curr_rh = 0
-                incub_hrs = 0
-
-                for t, rh in zip(temps, rhs):
-                    if rh is not None and rh >= 85:
-                        curr_rh += 1
-                        max_rh_hrs = max(max_rh_hrs, curr_rh)
-                    else:
-                        curr_rh = 0
-
-                    if t is not None and rh is not None and (18.0 <= t <= 24.0) and (rh >= 80):
-                        incub_hrs += 1
-
-                total_rain = sum(rains) if rains else 0.0
-                soil_deficit = max(0.0, soil_m[0] - soil_m[-1]) if soil_m and len(soil_m) > 1 else 0.0
-
-                return {
-                    "rainfall_anomaly": round(total_rain - 450.0, 2), # 450mm baseline
-                    "drought_risk": 1 if total_rain < 200.0 else 0,
-                    "rh_85_consecutive_hrs": max_rh_hrs,
-                    "incubation_hours": incub_hrs,
-                    "soil_water_deficit_72h": round(soil_deficit, 4)
-                }
-        except Exception as e:
-            print(f"Historical ERA5 query notice for ({lat}, {lon}): {e}")
-
-        return {
-            "rainfall_anomaly": 0.0,
-            "drought_risk": 0,
-            "rh_85_consecutive_hrs": 12,
-            "incubation_hours": 18,
-            "soil_water_deficit_72h": 0.04
-        }
-
-    def generate_african_geospatial_training_set(self, num_coordinates: int = 500) -> Tuple[pd.DataFrame, np.ndarray]:
-        """
-        Builds a comprehensive African geospatial dataset across major farming zones in Sub-Saharan Africa:
-        - Nigeria (Kaduna, Kano, Benue, Oyo)
-        - Kenya (Rift Valley, Eldoret)
-        - Ethiopia (Oromia, Amhara)
-        - Tanzania (Morogoro, Arusha)
-        """
-        print(f"Synthesizing & downloading real African geospatial climate signals across {num_coordinates} regions...")
-
-        african_farming_clusters = [
-            {"name": "Kaduna_Grain_Belt", "lat_range": (10.2, 11.5), "lon_range": (7.3, 8.5), "zone": 1},
-            {"name": "Kano_Sudan_Savannah", "lat_range": (11.8, 12.5), "lon_range": (8.2, 9.1), "zone": 2},
-            {"name": "Benue_River_Basin", "lat_range": (7.2, 8.0), "lon_range": (8.4, 9.3), "zone": 1},
-            {"name": "Kenya_Rift_Valley", "lat_range": (0.3, 1.2), "lon_range": (35.1, 36.0), "zone": 3},
-            {"name": "Ethiopian_Highlands", "lat_range": (8.5, 9.8), "lon_range": (38.2, 39.5), "zone": 3},
-        ]
-
-        records = []
-        labels = []
-
-        np.random.seed(42)
-        samples_per_cluster = num_coordinates // len(african_farming_clusters)
-
-        for cluster in african_farming_clusters:
-            for _ in range(samples_per_cluster):
-                lat = np.random.uniform(cluster["lat_range"][0], cluster["lat_range"][1])
-                lon = np.random.uniform(cluster["lon_range"][0], cluster["lon_range"][1])
-
-                # Multi-spectral Sentinel-2 Indices (NDVI, NDWI, EVI)
-                ndvi = np.clip(np.random.normal(0.55, 0.15), 0.15, 0.88)
-                ndwi = np.clip(np.random.normal(0.20, 0.12), -0.20, 0.50)
-                evi = np.clip(np.random.normal(0.42, 0.14), 0.10, 0.75)
-
-                # Fetch climate telemetry
-                climate = self.fetch_open_meteo_historical_era5(lat, lon)
-
-                # Agronomic features
-                yield_val = round(max(0.4, min(5.5, 1.6 + (ndvi - 0.4) * 3.5 - climate["drought_risk"] * 0.8)), 2)
-                shock_level = 2 if climate["drought_risk"] == 1 or climate["rh_85_consecutive_hrs"] >= 18 else (1 if climate["incubation_hours"] >= 15 else 0)
-
-                rec = {
-                    "yield": yield_val,
-                    "has_extension_access": np.random.choice([0, 1], p=[0.6, 0.4]),
-                    "household_max_education": np.random.choice([0, 1, 2, 3], p=[0.3, 0.4, 0.2, 0.1]),
-                    "shock_level": shock_level,
-                    "received_assistance": np.random.choice([0, 1], p=[0.7, 0.3]),
-                    "used_fertilizer": np.random.choice([0, 1], p=[0.5, 0.5]),
-                    "land_size": round(float(np.clip(np.random.exponential(2.2), 0.5, 15.0)), 2),
-                    "household_size": np.random.randint(1, 12),
-                    "zone": cluster["zone"],
-                    "transport_cost": round(float(np.random.uniform(1000, 12000)), 2),
-                    "dependency_ratio": round(float(np.random.uniform(0.2, 2.2)), 2),
-                    "asset_score": round(float(np.clip(np.random.normal(48, 14), 15.0, 95.0)), 1),
-                    "postharvest_activity_score": round(float(np.random.uniform(1.0, 9.0)), 1),
-                    "crop_loss_risk_score": 0.0,
-                    "crop_diversity_score": np.random.choice([1, 2, 3, 4], p=[0.4, 0.3, 0.2, 0.1]),
-                    "digital_access_score": round(float(np.random.uniform(10, 90)), 1),
-                    "has_veterinary_access": np.random.choice([0, 1], p=[0.7, 0.3]),
-                    "market_access_score": round(float(np.random.uniform(15, 85)), 1),
-                    "is_rural": 1,
-                    "rainfall_anomaly": climate["rainfall_anomaly"],
-                    "drought_risk": climate["drought_risk"],
-                    "cultivates_crops": 1,
-                    "received_credit": np.random.choice([0, 1], p=[0.75, 0.25]),
-                    "head_gender": np.random.choice([0, 1], p=[0.8, 0.2]),
-                    # Spectral indices are now direct model features (must match FEATURES + the
-                    # inference-time PredictionsService._map_features mapping).
-                    "ndvi": round(float(ndvi), 3),
-                    "ndwi": round(float(ndwi), 3),
-                    "evi": round(float(evi), 3)
-                }
-                records.append(rec)
-
-                # Ground Truth Label Calculation
-                # 0 = Normal, 1 = Elevated Stress, 2 = Critical Disease Outbreak / High Drought
-                if climate["rh_85_consecutive_hrs"] >= 16 and climate["incubation_hours"] >= 18 and ndwi < 0.12:
-                    label = 2 # Fungal Outbreak
-                elif climate["drought_risk"] == 1 or ndvi < 0.30:
-                    label = 2 # Critical Drought
-                elif climate["rh_85_consecutive_hrs"] >= 12 or ndwi < 0.20:
-                    label = 1 # Elevated Stress
-                else:
-                    label = 0 # Normal
-
-                labels.append(label)
-
-        df = pd.DataFrame(records)
-        return df[self.feature_list], np.array(labels)
+CACHE_DIR = Path(".cache/sentinel")
 
 
-def train_production_african_model():
-    print("==========================================================================")
-    print("  ArgoTech AI — Production African Geospatial Model Training Pipeline")
-    print("==========================================================================")
+def sample_sites(per_cluster: int, seed: int = 7) -> list[dict]:
+    """Deterministic pseudo-random sites. A fixed lattice jitter rather than `np.random.uniform`
+    so that adding sites later extends the set instead of reshuffling it."""
+    sites = []
+    for c_idx, cluster in enumerate(CLUSTERS):
+        lat0, lat1 = cluster["lat"]
+        lon0, lon1 = cluster["lon"]
+        for i in range(per_cluster):
+            # Halton-ish low-discrepancy fill: better spatial coverage than uniform draws at small n.
+            u = _radical_inverse(i + seed, 2)
+            v = _radical_inverse(i + seed, 3)
+            sites.append({
+                "site_id": f"{cluster['name']}-{i:03d}",
+                "cluster": cluster["name"],
+                "cluster_idx": c_idx,
+                "latitude": round(lat0 + u * (lat1 - lat0), 4),
+                "longitude": round(lon0 + v * (lon1 - lon0), 4),
+            })
+    return sites
 
-    builder = ProductionAfricanGeospatialDatasetBuilder()
-    X, y = builder.generate_african_geospatial_training_set(num_coordinates=600)
 
-    print(f"\nDataset successfully built: {X.shape[0]} samples across {X.shape[1]} features.")
-    print(f"Class Distribution: Low Risk (0): {np.sum(y == 0)}, Medium Risk (1): {np.sum(y == 1)}, High Risk (2): {np.sum(y == 2)}")
+def _radical_inverse(n: int, base: int) -> float:
+    out, denom = 0.0, 1.0
+    while n > 0:
+        denom *= base
+        out += (n % base) / denom
+        n //= base
+    return out
 
-    # 5-Fold Stratified Cross-Validation Evaluation
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    f1_scores = []
 
-    print("\nExecuting 5-Fold Stratified Cross-Validation...")
-    for fold, (train_idx, val_idx) in enumerate(skf.split(X, y)):
-        X_train, y_train = X.iloc[train_idx], y[train_idx]
-        X_val, y_val = X.iloc[val_idx], y[val_idx]
+def _sentinel_history(site: dict, days: int) -> list[dict]:
+    """Sentinel history with an on-disk cache. Training touches every site repeatedly across
+    experiments; the CDSE free tier should be spent once."""
+    path = CACHE_DIR / f"{site['site_id']}-{days}.json"
+    if path.exists():
+        return json.loads(path.read_text())
+    obs = sentinel_client.fetch_history(site["latitude"], site["longitude"], days=days, res_m=60)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obs))
+    return obs
 
-        fold_model = HybridSpatiotemporalEnsemble(random_state=42 + fold)
-        fold_model.fit(X_train, y_train)
 
-        preds = fold_model.predict(X_val)
-        score = f1_score(y_val, preds, average="weighted")
-        f1_scores.append(score)
-        print(f" Fold {fold + 1} Weighted F1-Score: {score:.4f}")
+def collect_site(site: dict, years: int) -> dict | None:
+    """Fetch both upstreams for one site. Returns None when either is unusable."""
+    days = years * 365
+    start = (date.today() - timedelta(days=days + WINDOW_DAYS + 10)).isoformat()
+    end = (date.today() - timedelta(days=6)).isoformat()   # ERA5 lags ~5 days
 
-    print(f"\nMean Cross-Validation F1-Score: {np.mean(f1_scores):.4f} (+/- {np.std(f1_scores):.4f})")
+    payload = meteo.fetch_archive(site["latitude"], site["longitude"], start, end)
+    history = _sentinel_history(site, days)
+    if not payload or len(history) < 6:
+        return None
 
-    # Fit final production model on full dataset
-    print("\nFitting final production Hybrid Spatiotemporal Ensemble Model on 100% data...")
-    final_model = HybridSpatiotemporalEnsemble(random_state=42)
-    final_model.fit(X, y)
+    return {
+        **site,
+        "elevation": payload.get("elevation", 0.0),
+        "daily": meteo.daily_frame(payload),
+        "history": history,
+    }
 
-    # Save model artifacts
-    model_path = "farmerxential_model.pkl"
-    powerful_path = "farmerxential_powerful_model.pkl"
-    final_model.save_model(model_path)
-    final_model.save_model(powerful_path)
 
-    # Fit and save TreeSHAP Explainer
-    print("Fitting TreeSHAP Explainer on XGBoost Base Estimator...")
-    explainer = shap.TreeExplainer(final_model.xgb)
-    joblib.dump(explainer, "farmerxential_shap_explainer.pkl")
-    print("TreeSHAP Explainer successfully saved to farmerxential_shap_explainer.pkl")
+def _climatological_rain_30(daily: dict, end_idx: int, exclude_year: str) -> float:
+    """Mean 30-day rainfall over the same calendar window in *other* years at this site."""
+    times = daily["time"]
+    rain = daily["precipitation_sum"]
+    target = times[end_idx][5:]                          # MM-DD
+    totals = []
+    for i, ts in enumerate(times):
+        if ts[5:] != target or ts[:4] == exclude_year or i < 30:
+            continue
+        totals.append(sum(rain[i - 30:i]))
+    return statistics.fmean(totals) if totals else sum(rain[max(0, end_idx - 30):end_idx])
 
-    print("\n==========================================================================")
-    print(" PRODUCTION MODEL TRAINING SUCCESSFULLY COMPLETED & WEIGH-FILES SAVED! ")
-    print("==========================================================================")
+
+def build_samples(sites: list[dict]) -> pd.DataFrame:
+    """Cross-join sites with their satellite observation dates, and label each from t+30."""
+    # Cohort NDVI per (cluster, sensing_date) for the cross-sectional peer z-score.
+    cohort: dict[tuple[str, str], list[float]] = {}
+    for s in sites:
+        for obs in s["history"]:
+            cohort.setdefault((s["cluster"], obs["sensing_date"]), []).append(obs["ndvi"])
+
+    rows = []
+    for s in sites:
+        times = s["daily"]["time"]
+        time_index = {t: i for i, t in enumerate(times)}
+        history = s["history"]
+
+        for k, obs in enumerate(history):
+            future = history[k + LABEL_HORIZON_INTERVALS:k + LABEL_HORIZON_INTERVALS + 1]
+            if not future:
+                continue
+            label_obs = future[0]
+
+            # Align the satellite date onto the weather series; require a full look-back window.
+            end_idx = time_index.get(obs["sensing_date"])
+            if end_idx is None or end_idx < WINDOW_DAYS:
+                continue
+
+            window = {k2: v[end_idx - WINDOW_DAYS:end_idx] for k2, v in s["daily"].items()}
+            peers_now = [v for v in cohort.get((s["cluster"], obs["sensing_date"]), []) if v != obs["ndvi"]]
+            past_ndvi = [o["ndvi"] for o in history[:k]]
+
+            sat = satellite_block(obs, past_ndvi, peers_now)
+            site_ctx = {
+                "latitude": s["latitude"], "longitude": s["longitude"], "elevation": s["elevation"],
+                "clim_rain_30": _climatological_rain_30(s["daily"], end_idx, obs["sensing_date"][:4]),
+            }
+            row = build(window, sat, site_ctx)
+
+            # --- label: peer-standardised NDVI one interval ahead ---
+            peers_future = [v for v in cohort.get((s["cluster"], label_obs["sensing_date"]), [])
+                            if v != label_obs["ndvi"]]
+            if len(peers_future) < 5:
+                continue
+            mean = statistics.fmean(peers_future)
+            sd = statistics.pstdev(peers_future)
+            if sd < 1e-6:
+                continue
+            z = (label_obs["ndvi"] - mean) / sd
+            row["label"] = 2 if z <= SEVERE_Z else (1 if z <= ELEVATED_Z else 0)
+
+            row["forward_z"] = round(z, 4)
+            row["site_id"] = s["site_id"]
+            row["cluster"] = s["cluster"]
+            row["obs_date"] = obs["sensing_date"]
+            rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def build_dataset(per_cluster: int = 30, years: int = 4, workers: int = 3) -> pd.DataFrame:
+    sites = sample_sites(per_cluster)
+    print(f"Collecting {len(sites)} sites x {years}y from Open-Meteo ERA5 + Sentinel-2 ...")
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        collected = [s for s in pool.map(lambda s: collect_site(s, years), sites) if s]
+    print(f"  {len(collected)}/{len(sites)} sites usable")
+
+    df = build_samples(collected)
+    print(f"  {len(df)} labelled samples")
+    return df
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--sites", type=int, default=30, help="sites per cluster")
+    ap.add_argument("--years", type=int, default=4)
+    ap.add_argument("--out", default="data/training_set.parquet")
+    args = ap.parse_args()
+
+    df = build_dataset(args.sites, args.years)
+    if df.empty:
+        raise SystemExit("no samples built — check Sentinel credentials and network")
+
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(args.out, index=False)
+
+    print(f"\nSaved {args.out}")
+    print(f"Features: {len(FEATURE_COLUMNS)}   Samples: {len(df)}   Sites: {df.site_id.nunique()}")
+    print(f"Date range: {df.obs_date.min()} .. {df.obs_date.max()}")
+    print("Class distribution:")
+    print(df.label.value_counts().sort_index().to_string())
 
 
 if __name__ == "__main__":
-    train_production_african_model()
+    main()

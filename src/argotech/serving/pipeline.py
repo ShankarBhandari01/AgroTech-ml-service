@@ -1,64 +1,64 @@
+"""Prediction pipeline: measurements in, decomposed risk out.
+
+The feature row is built by `features.agronomic.build` — the same function the training set was
+built with, over the same daily variables. That is the structural guarantee against train/serve
+skew, replacing the previous pipeline where `rainfall_anomaly` meant a six-month archive anomaly at
+training and eight-day raw rainfall at serving.
+
+The learned model does not produce the risk score on its own. It contributes the *vegetation hazard*
+term to the `domain.risk` composition, alongside the physics-derived drought, disease and heat
+terms. See docs/model-design.md §4.5.
+"""
+
+from __future__ import annotations
+
 import functools
-from typing import Tuple, Dict, Any, List, Optional
+from typing import Any, Optional
 
-from argotech.features.builder import FeatureStore
-from argotech.serving.schemas.request import FarmerPredictionRequest
-from argotech.models.registry import ModelManager
-from argotech.models.fusion import CrossAttentionFusionLayer
-from argotech.data.sentinel import sentinel_client
-from argotech.serving.schemas.response import (
-    PredictionResponse, 
-    PredictionProbabilities,
-    InferenceDetail,
-    SpatiotemporalIndices,
-    MicroclimateMetrics,
-    CrossAttentionDetail
-)
-from fastapi.concurrency import run_in_threadpool
-from fastapi import HTTPException
-from sqlalchemy.orm import Session
-from sqlalchemy import text
-import requests
 import pandas as pd
-import numpy as np
-import math
+import requests
+from fastapi import HTTPException
+from fastapi.concurrency import run_in_threadpool
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
-# Open-Meteo is a free public API with no SLA. This is the budget the call gets before the
-# prediction falls back to its default microclimate metrics.
-OPEN_METEO_TIMEOUT_SECONDS = 4
+from argotech.data import meteo
+from argotech.data.sentinel import sentinel_client
+from argotech.domain import agronomy, indices, risk
+from argotech.features.agronomic import WINDOW_DAYS, build, satellite_block
+from argotech.models.registry import ModelManager
+from argotech.serving.schemas.request import FarmerPredictionRequest
+from argotech.serving.schemas.response import (
+    CropHealthDetail,
+    HazardDetail,
+    InferenceDetail,
+    MicroclimateMetrics,
+    PredictionProbabilities,
+    PredictionResponse,
+    RiskAssessmentDetail,
+    SpatiotemporalIndices,
+    VulnerabilityDetail,
+)
+
+OPEN_METEO_TIMEOUT_SECONDS = 6
+
+# ponytail: farm-gate prices as a static per-crop table in USD/tonne. Exposure needs a price to be
+# expressed in currency at all; wire it to a market-price feed when one exists.
+FARMGATE_PRICE_USD_PER_T = {"maize": 250.0, "sorghum": 230.0, "rice": 420.0, "cassava": 120.0}
+DEFAULT_PRICE_USD_PER_T = 250.0
 
 
 class PredictionsService:
-    """
-    Early Warning Machine Learning Inference & Risk Assessment Service.
-    Integrates Spatiotemporal Sentinel-2 Spectral Indices (NDVI, NDWI, EVI),
-    Open-Meteo Microclimate Lag Feature Engineering, Cross-Attention Multi-Modal Fusion Layer,
-    and TreeSHAP Explainer.
-    """
-    def __init__(
-        self,
-        features: FeatureStore,
-        model_manager: ModelManager,
-        data: FarmerPredictionRequest,
-        db: Session
-    ):
-        self.features = features
+    def __init__(self, model_manager: ModelManager, data: FarmerPredictionRequest, db: Session):
         self.model_manager = model_manager
         self.data = data
         self.db = db
-        self.cross_attention_layer = CrossAttentionFusionLayer(
-            spatial_dim=4,
-            temporal_dim=4,
-            embed_dim=32,
-            num_heads=4
-        )
+
+    # ------------------------------------------------------------------ data
 
     async def _fetch_farmer_data(self):
-        """
-        Retrieves farmer profile, land specs, and crop metadata from PostgreSQL.
-        """
         query = text("""
-            SELECT 
+            SELECT
                 fp.user_id, fp.farm_size, fp.state, fp.latitude, fp.longitude, fp.crops,
                 fmp.yield_value, fmp.has_extension_access, fmp.household_max_education,
                 fmp.shock_level, fmp.received_assistance, fmp.used_fertilizer,
@@ -71,377 +71,268 @@ class PredictionsService:
             LEFT JOIN farmers_ml_profiles fmp ON fmp.farmer_id = fp.user_id
             WHERE fp.user_id = :farmer_id
         """)
-        
         result = await run_in_threadpool(
             self.db.execute(query, {"farmer_id": self.data.farmer_id}).fetchone
         )
-        
         if not result:
-            raise HTTPException(status_code=404, detail=f"Farmer '{self.data.farmer_id}' not found in database.")
-        
+            raise HTTPException(404, f"Farmer '{self.data.farmer_id}' not found in database.")
         return result
 
-    async def _fetch_microclimate_weather_data(self, lat: Optional[float], lon: Optional[float]) -> dict:
-        """
-        Fetches 7-day hourly Open-Meteo weather telemetry to construct microclimate lag features:
-        - Consecutive hours where RH >= 85%
-        - Optimal incubation hours (18°C <= T <= 24°C and RH >= 80%)
-        - Volumetric soil moisture deficit over 72 hours
-        - Rainfall anomaly
-        """
-        default_metrics = {
-            "rainfall_anomaly": 0.0,
-            "drought_risk": 0,
-            "rh_85_consecutive_hrs": 0,
-            "incubation_hours": 0,
-            "soil_water_deficit_72h": 0.0,
-            "hourly_sequence": np.zeros((168, 4)) # 7 days * 24 hours = 168 steps (temp, rh, soil_m, rain)
-        }
-        if lat is None or lon is None:
-            return default_metrics
+    @staticmethod
+    def _leaf_wetness(lat: float, lon: float) -> list[tuple[float, int]]:
+        """Per-day (mean temperature during the wet period, wet hours) from hourly Open-Meteo.
 
+        The disease model needs sub-daily resolution — leaf wetness duration is the input, and a
+        daily mean humidity cannot express it. One hourly call, separate from the daily call that
+        feeds the model features.
+        """
+        url = (f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+               f"&hourly=temperature_2m,relative_humidity_2m&past_days=14&forecast_days=1&timezone=UTC")
         try:
-            url = (
-                f"https://api.open-meteo.com/v1/forecast?"
-                f"latitude={lat}&longitude={lon}"
-                f"&hourly=temperature_2m,relative_humidity_2m,soil_moisture_0_to_7cm,rain"
-                f"&past_days=7&forecast_days=1&timezone=auto"
+            res = requests.get(url, timeout=OPEN_METEO_TIMEOUT_SECONDS)
+            res.raise_for_status()
+            hourly = res.json().get("hourly", {})
+            temps, rhs = hourly.get("temperature_2m", []), hourly.get("relative_humidity_2m", [])
+        except Exception as e:  # noqa: BLE001
+            print(f"[pipeline] hourly weather unavailable: {e}")
+            return []
+
+        days = []
+        for start in range(0, len(temps) - 23, 24):
+            t_day = [t for t in temps[start:start + 24] if t is not None]
+            rh_day = rhs[start:start + 24]
+            wet = [t for t, rh in zip(temps[start:start + 24], rh_day)
+                   if t is not None and rh is not None and rh >= 90]
+            if wet:
+                days.append((sum(wet) / len(wet), len(wet)))
+            elif t_day:
+                days.append((sum(t_day) / len(t_day), 0))
+        return days
+
+    # ------------------------------------------------------------------ inference
+
+    async def predict(self) -> PredictionResponse:
+        return await self.predict_from_farmer_data(await self._fetch_farmer_data())
+
+    async def predict_from_farmer_data(self, farmer) -> PredictionResponse:
+        lat, lon = farmer.latitude, farmer.longitude
+        if lat is None or lon is None:
+            raise HTTPException(422, "Prediction requires latitude and longitude.")
+        lat, lon = float(lat), float(lon)
+
+        crop = self._crop_name(farmer)
+        payload = await run_in_threadpool(functools.partial(meteo.fetch_recent, lat, lon, 92))
+        history = await run_in_threadpool(sentinel_client.fetch_history, lat, lon, 365)
+        wet_days = await run_in_threadpool(self._leaf_wetness, lat, lon)
+
+        if not payload:
+            raise HTTPException(503, "Weather upstream unavailable; cannot build features.")
+        daily = meteo.daily_frame(payload)
+        if len(daily["time"]) < WINDOW_DAYS:
+            raise HTTPException(503, "Insufficient weather history for the 90-day feature window.")
+
+        # ---- canopy state -------------------------------------------------
+        crop_health: Optional[indices.CropHealth] = None
+        if history:
+            latest = history[-1]
+            series = [o["ndvi"] for o in history]
+            sat = satellite_block(latest, series[:-1], series[:-1])
+            crop_health = indices.crop_health_index(
+                current_ndvi=latest["ndvi"], ndmi_value=latest["ndwi"],
+                ndvi_min=min(series), ndvi_max=max(series),
+                peer_mean=sum(series) / len(series),
+                peer_std=(sum((v - sum(series) / len(series)) ** 2 for v in series) / len(series)) ** 0.5,
             )
-            # timeout is a requests kwarg, NOT a query parameter. Passed inside params= it was
-            # appended to the Open-Meteo URL as ?timeout=4 and the call had no timeout at all —
-            # a hung upstream would block this threadpool worker forever, and enough of them
-            # would stop the service answering anything, /health included.
-            res = await run_in_threadpool(
-                functools.partial(requests.get, url, timeout=OPEN_METEO_TIMEOUT_SECONDS)
-            )
-            if res.status_code == 200:
-                hourly = res.json().get("hourly", {})
-                temps = hourly.get("temperature_2m", [])
-                rhs = hourly.get("relative_humidity_2m", [])
-                soil_m = hourly.get("soil_moisture_0_to_7cm", [])
-                rains = hourly.get("rain", [])
+            index_source, sensing_date = "sentinel-2", latest["sensing_date"]
+        else:
+            # No cloud-free scene. Rather than invent indices, mark the canopy block unavailable and
+            # let the physical hazards carry the assessment — they need no satellite at all.
+            sat = {"ndvi": 0.0, "ndmi": 0.0, "evi": 0.0, "vci": 50.0, "ndvi_z_peer": 0.0}
+            index_source, sensing_date = "unavailable", None
 
-                total_rain = sum(rains) if rains else 0.0
-                drought_risk = 1 if total_rain < 5.0 else 0
+        # ---- feature row (identical builder to training) -------------------
+        target_mmdd = daily["time"][-1][5:]
+        clim = await run_in_threadpool(meteo.climatological_rain_30, lat, lon, target_mmdd)
+        site = {"latitude": lat, "longitude": lon,
+                "elevation": payload.get("elevation", 0.0),
+                "clim_rain_30": clim if clim is not None else sum(daily["precipitation_sum"][-30:])}
+        row = build(daily, sat, site, crop)
 
-                # Compute consecutive high humidity hours (RH >= 85%)
-                max_consecutive_rh = 0
-                curr_consecutive = 0
-                incubation_hrs = 0
+        # ---- learned vegetation hazard ------------------------------------
+        vegetation_hazard, probabilities = 0.0, None
+        if index_source == "sentinel-2":
+            model, columns = self.model_manager.agronomic_model()
+            proba = await run_in_threadpool(model.predict_proba, pd.DataFrame([row])[columns])
+            p = proba[0]
+            # Expected severity on 0-1: the ranking score, and the term fed into the composition.
+            vegetation_hazard = float(p[1] * 0.5 + p[2] * 1.0)
+            probabilities = PredictionProbabilities(low=round(float(p[0]), 3),
+                                                    medium=round(float(p[1]), 3),
+                                                    high=round(float(p[2]), 3))
 
-                # Build hourly sequence tensor for Cross-Attention
-                steps = min(len(temps), len(rhs), len(soil_m), len(rains))
-                seq = np.zeros((steps, 4))
-                for idx in range(steps):
-                    t = temps[idx] if temps[idx] is not None else 22.0
-                    rh = rhs[idx] if rhs[idx] is not None else 65.0
-                    sm = soil_m[idx] if soil_m[idx] is not None else 0.25
-                    r = rains[idx] if rains[idx] is not None else 0.0
+        # ---- physical hazards ---------------------------------------------
+        dsv_total, spray_due = agronomy.accumulate_dsv(
+            [agronomy.daily_severity_value(t, h) for t, h in wet_days])
+        hazard = risk.assess_hazard(
+            water_satisfaction=row["water_satisfaction_30"],
+            dry_spell_days=row["dry_spell_30"],
+            cumulative_dsv=dsv_total,
+            heat_days=row["heat_stress_days"],
+            vegetation=vegetation_hazard,
+        )
 
-                    seq[idx] = [t, rh, sm, r]
+        exposure = risk.assess_exposure(
+            area_ha=self._parse_farm_size(farmer.farm_size),
+            expected_yield_t_ha=self._expected_yield(farmer, sat["ndvi"]),
+            price_per_t=FARMGATE_PRICE_USD_PER_T.get(crop.lower(), DEFAULT_PRICE_USD_PER_T),
+        )
+        vulnerability = risk.assess_vulnerability(self._coping_signals(farmer))
+        assessment = risk.assess_risk(hazard, exposure, vulnerability)
 
-                    if rh >= 85:
-                        curr_consecutive += 1
-                        max_consecutive_rh = max(max_consecutive_rh, curr_consecutive)
-                    else:
-                        curr_consecutive = 0
+        # ---- response ------------------------------------------------------
+        severity_to_class = {"NORMAL": 0, "WATCH": 0, "ELEVATED": 1, "CRITICAL": 2}
+        pred_val = severity_to_class[assessment.severity]
+        stage = agronomy.phenology_stage(row["gdd_since_onset"], crop)
+        drivers = self._drivers(row, hazard, vulnerability, dsv_total, spray_due, crop_health)
 
-                    if (18.0 <= t <= 24.0) and (rh >= 80):
-                        incubation_hrs += 1
+        return PredictionResponse(
+            field_id=self.data.farmer_id,
+            crop_type=crop,
+            phenology_stage=stage,
+            prediction=pred_val,
+            priority_label={0: "Low Priority", 1: "Medium Priority", 2: "High Priority"}[pred_val],
+            risk_score_percent=assessment.risk_score,
+            probabilities=probabilities or PredictionProbabilities(low=1.0, medium=0.0, high=0.0),
+            top_risk_factors=drivers,
+            inference=InferenceDetail(
+                risk_level=assessment.severity,
+                dominant_hazard=hazard.dominant,
+                probability=round(hazard.combined, 3),
+                primary_drivers=drivers[:4],
+                model_contributed=index_source == "sentinel-2",
+            ),
+            risk_assessment=RiskAssessmentDetail(
+                risk_score=assessment.risk_score,
+                expected_loss_usd=assessment.expected_loss,
+                value_at_risk_usd=exposure.value_at_risk,
+                hazard=HazardDetail(**hazard.as_dict()),
+                vulnerability=VulnerabilityDetail(**vulnerability.as_dict()),
+            ),
+            crop_health=CropHealthDetail(**crop_health.as_dict()) if crop_health else None,
+            spatiotemporal_indices=SpatiotemporalIndices(
+                ndvi=round(sat["ndvi"], 3), ndwi=round(sat["ndmi"], 3), evi=round(sat["evi"], 3),
+                vci=round(sat["vci"], 1),
+                canopy_stress_status=crop_health.status if crop_health else "Unavailable",
+                source=index_source, sensing_date=sensing_date,
+            ),
+            microclimate_metrics=MicroclimateMetrics(
+                water_satisfaction_30d=row["water_satisfaction_30"],
+                water_deficit_30d_mm=row["water_deficit_30"],
+                longest_dry_spell_days=row["dry_spell_30"],
+                rainfall_anomaly_30d_mm=row["rain_anomaly_30"],
+                heat_stress_days=row["heat_stress_days"],
+                cumulative_dsv=dsv_total,
+                spray_threshold_reached=spray_due,
+                gdd_since_onset=row["gdd_since_onset"],
+            ),
+            recommended_action=self._action(assessment, hazard, spray_due, stage, crop),
+        )
 
-                # Soil moisture deficit over 72 hours
-                soil_deficit = 0.0
-                if soil_m and len(soil_m) >= 72:
-                    val_start = soil_m[-72] if soil_m[-72] is not None else 0.0
-                    val_end = soil_m[-1] if soil_m[-1] is not None else 0.0
-                    soil_deficit = max(0.0, val_start - val_end)
-
-                # ponytail: `rainfall_anomaly` here is raw 8-day rainfall (0-60 mm), while the
-                # training set builds it as `six_month_total - 450` (-450 to +400). Same column
-                # name, incompatible distributions — the single worst train/serve skew in the
-                # service. Not fixed in place because correcting the serving side alone shifts
-                # the input distribution under an un-retrained model; fix it together with the
-                # retrain (docs/model-design.md, P0-1).
-                return {
-                    "rainfall_anomaly": round(total_rain, 2),
-                    "drought_risk": drought_risk,
-                    "rh_85_consecutive_hrs": max_consecutive_rh,
-                    "incubation_hours": incubation_hrs,
-                    "soil_water_deficit_72h": round(soil_deficit, 4),
-                    "hourly_sequence": seq if steps > 0 else np.zeros((168, 4))
-                }
-
-        except Exception as e:
-            print(f"Microclimate Weather API query warning: {e}")
-
-        return default_metrics
-
-    async def _resolve_spatiotemporal_indices(self, lat: Optional[float], lon: Optional[float], state: Optional[str] = None) -> dict:
-        """
-        Real Sentinel-2 spectral indices (NDVI/NDWI/EVI) via the CDSE Statistical API when
-        credentials are configured and a cloud-free scene exists, otherwise the synthetic model.
-        Tagged with `source` ("sentinel-2" vs "modelled") so downstream/UI can tell them apart.
-        The blocking Sentinel call is off-loaded to a threadpool so the event loop isn't blocked.
-        """
-        real = await run_in_threadpool(sentinel_client.fetch_indices, lat, lon)
-        if real:
-            ndvi, ndwi, evi = real["ndvi"], real["ndwi"], real["evi"]
-            return {
-                "ndvi": round(ndvi, 3),
-                "ndwi": round(ndwi, 3),
-                "evi": round(evi, 3),
-                "canopy_stress_status": self._canopy_status(ndvi, ndwi),
-                "source": "sentinel-2",
-                "sensing_date": real.get("sensing_date"),
-            }
-        return self._synthetic_indices(lat, lon, state)
-
-    def _synthetic_indices(self, lat: Optional[float], lon: Optional[float], state: Optional[str] = None) -> dict:
-        """
-        Deterministic fallback spectral indices when real Sentinel-2 data isn't available. Kept as a
-        graceful degradation path so inference never hard-fails on a missing scene / credentials.
-        """
-        lat_val = float(lat) if lat is not None else 11.8333
-        lon_val = float(lon) if lon is not None else 13.1500
-
-        base_signal = math.sin(lat_val * 0.1) * math.cos(lon_val * 0.1)
-        ndvi = round(max(0.20, min(0.85, 0.55 + base_signal * 0.2)), 3)
-        ndwi = round(max(-0.15, min(0.50, 0.25 + base_signal * 0.15)), 3)
-        evi = round(max(0.15, min(0.75, 0.45 + base_signal * 0.18)), 3)
-
-        return {
-            "ndvi": ndvi,
-            "ndwi": ndwi,
-            "evi": evi,
-            "canopy_stress_status": self._canopy_status(ndvi, ndwi),
-            "source": "modelled",
-        }
+    # ------------------------------------------------------------------ helpers
 
     @staticmethod
-    def _canopy_status(ndvi: float, ndwi: float) -> str:
-        if ndwi < 0.05:
-            return "High Water Stress"
-        elif ndvi < 0.35:
-            return "Vegetation Degradation"
-        return "Healthy Canopy"
+    def _crop_name(farmer) -> str:
+        crops = farmer.crops
+        if isinstance(crops, list) and crops:
+            return str(crops[0]).strip()
+        if isinstance(crops, str) and crops.strip():
+            return crops.split(",")[0].strip()
+        return "Maize"
 
     @staticmethod
     def _parse_farm_size(val: Any) -> float:
-        """
-        Parses farm_size attribute: handles float/int directly or string like "12 Hectares" / "12.5 ha".
-        """
         if isinstance(val, (int, float)):
             return float(val)
         if isinstance(val, str) and val.strip():
             try:
-                return float(val.strip().split(' ')[0])
+                return float(val.strip().split(" ")[0])
             except (ValueError, IndexError):
                 return 1.0
         return 1.0
 
-    def _map_features(self, result, weather: dict, indices: dict) -> Tuple[dict, str]:
-        state_map = {"Kaduna": 1, "Kano": 2, "Lagos": 3}
-        zone_id = state_map.get(result.state, 0)
-        
-        land_size = self._parse_farm_size(result.farm_size)
+    @staticmethod
+    def _expected_yield(farmer, ndvi: float) -> float:
+        """Reported yield when the survey has one; otherwise an NDVI-anchored estimate.
 
-        is_cold_start = (result.yield_value is None and result.shock_level is None)
-        mode = "GEOSPATIAL_COLDSTART_REMOTE_SENSING" if is_cold_start else "HYBRID_SURVEY_REMOTE_SENSING"
+        Explicitly a placeholder for the yield-anomaly regression in docs/model-design.md §4.4,
+        which needs a season of harvest records that do not exist yet.
+        """
+        reported = getattr(farmer, "yield_value", None)
+        if reported is not None:
+            return float(reported)
+        return round(max(0.5, min(5.0, 1.5 + (ndvi - 0.4) * 3.5)), 2)
 
-        # In cold-start mode, derive yield & vulnerability proxies directly from Sentinel-2 & Open-Meteo
-        if is_cold_start:
-            ndvi_val = indices.get("ndvi", 0.5)
-            estimated_yield = round(max(0.8, min(4.5, 1.5 + (ndvi_val - 0.4) * 3.5)), 2)
-            estimated_shock = 2 if weather.get("drought_risk", 0) == 1 else 0
-            asset_proxy = round(max(20.0, min(80.0, 45.0 + (indices.get("evi", 0.4) - 0.3) * 50.0)), 1)
-        else:
-            estimated_yield = float(result.yield_value) if result.yield_value is not None else 1.2
-            estimated_shock = int(result.shock_level) if result.shock_level is not None else 0
-            asset_proxy = float(result.asset_score) if result.asset_score is not None else 45.0
+    @staticmethod
+    def _coping_signals(farmer) -> dict:
+        """Vulnerability inputs. `head_gender` and `household_max_education` are deliberately absent
+        — `risk.assess_vulnerability` rejects them (docs/model-design.md, P1-4)."""
+        def num(attr, default=0.0):
+            v = getattr(farmer, attr, None)
+            return float(v) if v is not None else default
 
-        mapped = {
-            "yield_value": estimated_yield,
-            "has_extension_access": 1 if result.has_extension_access else 0,
-            "household_max_education": int(result.household_max_education) if result.household_max_education is not None else 1,
-            "shock_level": estimated_shock,
-            "received_assistance": 1 if result.received_assistance else 0,
-            "used_fertilizer": 1 if result.used_fertilizer else 0,
-            "land_size": land_size,
-            "household_size": int(result.household_size) if result.household_size is not None else 4,
-            "zone": zone_id,
-            "transport_cost": float(result.transport_cost) if result.transport_cost is not None else 2500.0,
-            "dependency_ratio": float(result.dependency_ratio) if result.dependency_ratio is not None else 0.8,
-            "asset_score": asset_proxy,
-            "postharvest_activity_score": float(result.postharvest_activity_score) if result.postharvest_activity_score is not None else 3.5,
-            "crop_loss_risk_score": 0.0,
-            "crop_diversity_score": float(result.crop_diversity_score) if result.crop_diversity_score is not None else 2.0,
-            "digital_access_score": float(result.digital_access_score) if result.digital_access_score is not None else 50.0,
-            "has_veterinary_access": 1 if result.has_veterinary_access else 0,
-            "market_access_score": float(result.market_access_score) if result.market_access_score is not None else 55.0,
-            "is_rural": 1,
-            "rainfall_anomaly": weather["rainfall_anomaly"],
-            "drought_risk": weather["drought_risk"],
-            "cultivates_crops": 1,
-            "received_credit": 1 if result.received_credit else 0,
-            "head_gender": int(result.head_gender) if result.head_gender is not None else 0,
-            # Spectral indices as direct model inputs — real Sentinel-2 values when available,
-            # synthetic fallback otherwise (see _resolve_spatiotemporal_indices). Must stay in lockstep
-            # with FEATURES and the training record schema.
-            "ndvi": float(indices.get("ndvi", 0.5)),
-            "ndwi": float(indices.get("ndwi", 0.2)),
-            "evi": float(indices.get("evi", 0.4))
+        return {
+            "has_irrigation": 0.0,   # not captured by the current schema; add to farmers_ml_profiles
+            "has_extension_access": 1.0 if getattr(farmer, "has_extension_access", None) else 0.0,
+            "received_credit": 1.0 if getattr(farmer, "received_credit", None) else 0.0,
+            "used_fertilizer": 1.0 if getattr(farmer, "used_fertilizer", None) else 0.0,
+            "crop_diversity": min(1.0, num("crop_diversity_score") / 4.0),
+            "asset_score": min(1.0, num("asset_score", 45.0) / 100.0),
+            "market_access": min(1.0, num("market_access_score", 50.0) / 100.0),
         }
 
-        return mapped, mode
+    @staticmethod
+    def _drivers(row, hazard, vulnerability, dsv_total, spray_due, crop_health) -> list[str]:
+        out = []
+        if hazard.drought > 0.2:
+            out.append(f"Water satisfaction {row['water_satisfaction_30']:.0%} over 30 days "
+                       f"({row['water_deficit_30']:.0f} mm unmet demand)")
+        if row["dry_spell_30"] >= 8:
+            out.append(f"Longest dry spell {row['dry_spell_30']} days in the last 30")
+        if spray_due:
+            out.append(f"Blight severity values at {dsv_total}, spray threshold (18) reached")
+        elif dsv_total >= 9:
+            out.append(f"Blight severity values accumulating ({dsv_total}/18)")
+        if row["heat_stress_days"]:
+            out.append(f"{row['heat_stress_days']} days above 35 °C during flowering")
+        if hazard.vegetation > 0.35:
+            out.append(f"Model projects canopy stress relative to peers within 30 days "
+                       f"(hazard {hazard.vegetation:.2f})")
+        if crop_health and crop_health.score < 45:
+            out.append(f"Crop Health Index {crop_health.score:.0f}/100 — {crop_health.status}")
+        if row["rain_anomaly_30"] < -20:
+            out.append(f"Rainfall {abs(row['rain_anomaly_30']):.0f} mm below the site's normal "
+                       f"for this time of year")
+        for gap in vulnerability.gaps[:2]:
+            out.append(f"Limited coping capacity: {gap.replace('_', ' ')}")
+        return out or ["No critical stress drivers detected"]
 
-    def _generate_risk_drivers(self, payload_dict: dict, weather: dict, indices: dict) -> list:
-        drivers = []
-        if weather.get("rh_85_consecutive_hrs", 0) >= 12:
-            drivers.append(f"Relative humidity > 85% for {weather['rh_85_consecutive_hrs']} consecutive hours")
-        if weather.get("incubation_hours", 0) >= 15:
-            drivers.append(f"Fungal incubation window active for {weather['incubation_hours']} hours (18–24°C)")
-        if weather.get("soil_water_deficit_72h", 0) > 0.05:
-            drivers.append(f"Soil water deficit drop of {weather['soil_water_deficit_72h']:.3f} m³/m³ over 72h")
-
-        if indices["ndwi"] < 0.10:
-            drivers.append(f"Leaf water stress detected (NDWI: {indices['ndwi']:.2f})")
-        if indices["ndvi"] < 0.35:
-            drivers.append(f"Low canopy greenness / biomass density (NDVI: {indices['ndvi']:.2f})")
-
-        yield_val = payload_dict.get("yield_value", 1.5)
-        if yield_val < 1.5:
-            drivers.append("Low crop yield (< 1.5 tons/ha)")
-        if not payload_dict["has_extension_access"]:
-            drivers.append("No agricultural extension worker visits")
-        if payload_dict["shock_level"] > 1:
-            drivers.append("High vulnerability to climate/market shocks")
-        if not payload_dict["received_credit"]:
-            drivers.append("No access to agricultural credit or micro-financing")
-        if not payload_dict["used_fertilizer"]:
-            drivers.append("No modern fertilizer inputs applied")
-        if weather["drought_risk"] == 1:
-            drivers.append("Localized rainfall deficit / drought warning")
-
-        if not drivers:
-            drivers.append("Optimal growing conditions — no critical stress drivers detected")
-            
-        return drivers
-
-    async def predict(self) -> PredictionResponse:
-        farmer_data = await self._fetch_farmer_data()
-        return await self.predict_from_farmer_data(farmer_data)
-
-    async def predict_from_farmer_data(self, farmer_data) -> PredictionResponse:
-        try:
-            weather = await self._fetch_microclimate_weather_data(farmer_data.latitude, farmer_data.longitude)
-            indices = await self._resolve_spatiotemporal_indices(farmer_data.latitude, farmer_data.longitude, farmer_data.state)
-            payload_dict, inference_mode = self._map_features(farmer_data, weather, indices)
-
-
-            #  Execute Cross-Attention Fusion
-            spatial_vector = np.array([indices["ndvi"], indices["ndwi"], indices["evi"], payload_dict["land_size"]])
-            temporal_seq = weather["hourly_sequence"]
-            
-            fused_representation, attn_weights = self.cross_attention_layer.forward(spatial_vector, temporal_seq)
-            fusion_score = round(float(np.mean(fused_representation)), 4)
-            peak_incubation_hour = int(np.argmax(attn_weights[0])) if attn_weights is not None and attn_weights.shape[1] > 0 else 0
-
-            # Build DataFrame for ML model
-            df = self.features.build_features(payload_dict)
-
-            # 3. Run Scikit-Learn / XGBoost Prediction
-            prediction = await run_in_threadpool(
-                self.model_manager.predict,
-                df,
-                self.data.model_name,
-                self.data.model_alias
-            )
-
-            proba = await run_in_threadpool(
-                self.model_manager.predict_proba,
-                df,
-                self.data.model_name,
-                self.data.model_alias
-            )
-
-            pred_val = int(prediction[0])
-            risk_score = round(float(proba[0][2]) * 100, 1) if (proba is not None and len(proba[0]) > 2) else 10.0
-            
-            probabilities = PredictionProbabilities(
-                low=round(float(proba[0][0]), 3) if proba is not None else 0.9,
-                medium=round(float(proba[0][1]), 3) if proba is not None else 0.08,
-                high=round(float(proba[0][2]), 3) if proba is not None else 0.02
-            )
-
-            priority_map = {0: "Low Priority", 1: "Medium Priority", 2: "High Priority"}
-            priority_label = priority_map.get(pred_val, "Low Priority")
-
-            # Dynamic Risk Drivers
-            risk_drivers = self._generate_risk_drivers(payload_dict, weather, indices)
-
-            crop_list = farmer_data.crops if isinstance(farmer_data.crops, list) else (farmer_data.crops.split(',') if farmer_data.crops else ['Maize'])
-            crop_name = crop_list[0].strip() if crop_list else "Maize"
-
-            if pred_val >= 2 or risk_score >= 70:
-                risk_level = "CRITICAL"
-                disease_type = f"Late Blight / Fungal Leaf Rust in {crop_name}"
-                recommended_action = "Apply protective copper-based fungicide spray within 24–48 hours and dispatch extension agent for immediate field inspection."
-            elif pred_val == 1 or risk_score >= 40:
-                risk_level = "ELEVATED"
-                disease_type = f"Early Leaf Water & Moisture Stress in {crop_name}"
-                recommended_action = "Initiate supplemental drip irrigation and monitor canopy NDWI water stress index closely over 48 hours."
-            else:
-                risk_level = "NORMAL"
-                disease_type = "No Disease Outbreak Detected"
-                recommended_action = "Maintain standard agronomic fertilizer & weeding schedule."
-
-            inference_detail = InferenceDetail(
-                risk_level=risk_level,
-                disease_type=disease_type,
-                probability=round(float(proba[0][pred_val]), 3) if proba is not None else 0.85,
-                primary_drivers=risk_drivers[:4]
-            )
-
-            spatiotemporal = SpatiotemporalIndices(
-                ndvi=indices["ndvi"],
-                ndwi=indices["ndwi"],
-                evi=indices["evi"],
-                canopy_stress_status=indices["canopy_stress_status"],
-                source=indices.get("source", "modelled")
-            )
-
-            microclimate = MicroclimateMetrics(
-                rh_85_consecutive_hrs=weather["rh_85_consecutive_hrs"],
-                incubation_hours=weather["incubation_hours"],
-                soil_water_deficit_72h=weather["soil_water_deficit_72h"],
-                rainfall_anomaly=weather["rainfall_anomaly"]
-            )
-
-            cross_attention = CrossAttentionDetail(
-                fusion_score=fusion_score,
-                peak_incubation_hour=peak_incubation_hour,
-                fusion_status="Active Spatiotemporal Cross-Attention Align"
-            )
-
-            return PredictionResponse(
-                field_id=self.data.farmer_id,
-                crop_type=crop_name,
-                phenology_stage="Vegetative / Flowering",
-                prediction=pred_val,
-                priority_label=priority_label,
-                risk_score_percent=risk_score,
-                probabilities=probabilities,
-                top_risk_factors=risk_drivers,
-                inference=inference_detail,
-                spatiotemporal_indices=spatiotemporal,
-                microclimate_metrics=microclimate,
-                cross_attention_fusion=cross_attention,
-                recommended_action=recommended_action
-            )
-
-        except HTTPException:
-            raise
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            raise HTTPException(status_code=400, detail=f"Prediction pipeline failed: {str(e)}")
+    @staticmethod
+    def _action(assessment, hazard, spray_due, stage, crop) -> str:
+        if spray_due:
+            return ("Apply a protective fungicide within 24-48 h: accumulated blight severity has "
+                    "reached the spray threshold, and dispatch an agent to confirm the diagnosis.")
+        if hazard.dominant == "drought" and hazard.drought > 0.4:
+            return (f"Prioritise supplemental irrigation — {crop} at {stage} is in water deficit. "
+                    "Advise mulching and, if the deficit persists, staggered replanting.")
+        if hazard.dominant == "heat":
+            return ("Heat stress during flowering: advise irrigation timed to early morning to "
+                    "reduce canopy temperature; expect pollination loss and plan for it.")
+        if hazard.dominant == "disease":
+            return (f"Blight severity is accumulating on {crop} at {stage}. Scout the lower canopy "
+                    "for lesions now and have fungicide staged before the threshold is reached.")
+        if hazard.dominant == "vegetation":
+            return ("Canopy is projected to fall behind neighbouring fields. Schedule a scouting "
+                    "visit to identify the cause before it shows in yield.")
+        if assessment.severity in ("ELEVATED", "WATCH"):
+            return "Increase monitoring frequency; no single dominant hazard yet."
+        return "Maintain the standard fertiliser and weeding schedule."

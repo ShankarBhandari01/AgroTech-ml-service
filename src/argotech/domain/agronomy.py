@@ -38,6 +38,30 @@ def growing_degree_days(tmin: float, tmax: float, base: float = 10.0, cap: float
     return max(0.0, (tmax_c + tmin_c) / 2.0 - base)
 
 
+def season_onset_index(daily_rain_mm: list[float], wet_spell_mm: float = 20.0,
+                       wet_spell_days: int = 3, dry_spell_days: int = 10) -> int | None:
+    """Index of the rainy-season onset in a daily rainfall series, or None if it has not started.
+
+    The standard agronomic onset rule for Sub-Saharan Africa (Sivakumar 1988): the first day of a
+    `wet_spell_days` window accumulating `wet_spell_mm`, not followed by a dry spell long enough to
+    kill the germinating crop. Planting date anchors thermal time, which anchors phenology, which
+    sets the crop coefficient and the heat-stress window — so this is what makes every stage-aware
+    feature downstream mean anything.
+    """
+    n = len(daily_rain_mm)
+    for i in range(n - wet_spell_days):
+        if sum(daily_rain_mm[i:i + wet_spell_days]) < wet_spell_mm:
+            continue
+        follow = daily_rain_mm[i + wet_spell_days:i + wet_spell_days + 30]
+        run = longest = 0
+        for r in follow:
+            run = run + 1 if r < 1.0 else 0
+            longest = max(longest, run)
+        if longest < dry_spell_days:
+            return i
+    return None
+
+
 def phenology_stage(cumulative_gdd: float, crop: str = DEFAULT_CROP) -> str:
     """Map accumulated thermal time since planting to a growth stage.
 

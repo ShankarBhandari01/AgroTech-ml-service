@@ -62,6 +62,12 @@ def test_risk():
     drought = risk.assess_hazard(water_satisfaction=0.3, dry_spell_days=21, cumulative_dsv=0, heat_days=0)
     assert drought.dominant == "drought"
 
+    # The learned model enters as one more independent hazard, and must raise the combined value.
+    with_model = risk.assess_hazard(water_satisfaction=0.95, dry_spell_days=1, cumulative_dsv=0,
+                                    heat_days=0, vegetation=0.8)
+    assert with_model.dominant == "vegetation"
+    assert with_model.combined > calm.combined
+
     # A protected attribute must raise, not be silently dropped.
     try:
         risk.assess_vulnerability({"asset_score": 0.5, "head_gender": 1})

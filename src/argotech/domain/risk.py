@@ -54,6 +54,7 @@ class Hazard:
     drought: float
     disease: float
     heat: float
+    vegetation: float
     combined: float
     dominant: str
 
@@ -63,8 +64,14 @@ class Hazard:
 
 def assess_hazard(water_satisfaction: float, dry_spell_days: int,
                   cumulative_dsv: int, heat_days: int,
+                  vegetation: float = 0.0,
                   spray_threshold: int = 18) -> Hazard:
-    """Map agronomic indicators onto three hazard intensities in [0, 1].
+    """Map agronomic indicators onto hazard intensities in [0, 1].
+
+    `vegetation` is where the learned model plugs in: the trained classifier's expected severity for
+    forward canopy stress, entering as one more independent hazard rather than as a competing
+    overall score. Leave it at 0 to get the pure physics/epidemiology assessment — which is also the
+    baseline the learned component has to beat before it is worth including.
 
     The mappings are explicit and monotone by construction. They are *priors*, replaced component by
     component as outcome labels accumulate — see `docs/model-design.md`, phase 2.
@@ -80,13 +87,15 @@ def assess_hazard(water_satisfaction: float, dry_spell_days: int,
     # Heat: days above the pollen-viability threshold during flowering. Three such days is severe.
     heat = _clamp01(heat_days / 3.0)
 
-    parts = {"drought": drought, "disease": disease, "heat": heat}
+    parts = {"drought": drought, "disease": disease, "heat": heat,
+             "vegetation": _clamp01(vegetation)}
     dominant = max(parts, key=parts.get) if max(parts.values()) > 0.05 else "none"
 
     return Hazard(
         drought=round(drought, 3),
         disease=round(disease, 3),
         heat=round(heat, 3),
+        vegetation=round(_clamp01(vegetation), 3),
         combined=round(noisy_or(list(parts.values())), 3),
         dominant=dominant,
     )
