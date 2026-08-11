@@ -5,11 +5,13 @@ Real Sentinel-2 spectral indices for coldstart inference, via the Copernicus Dat
 which is why it's the right tool for *feature* extraction (the map-tile visualisation path lives in
 the Kotlin backend instead).
 
-Disabled (returns None) when no credentials are configured, so PredictionsService transparently
-falls back to its synthetic index model. Blocking `requests` calls are used deliberately — the
-caller wraps this in `run_in_threadpool` so the event loop isn't blocked.
+Returns nothing when no credentials are configured or no cloud-free scene exists. Callers mark the
+canopy block unavailable rather than substituting modelled indices: an invented NDVI is worse than
+an absent one, because the physics-derived hazards carry the assessment perfectly well without it.
+
+Blocking `requests` calls are used deliberately — callers wrap this in `run_in_threadpool` so the
+event loop isn't blocked.
 """
-# Defers annotation evaluation so PEP 604 unions (`dict | None`) work on this service's Python 3.9.
 from __future__ import annotations
 
 import math
@@ -137,7 +139,7 @@ class SentinelClient:
                         "sensing_date": str(iv.get("interval", {}).get("to", ""))[:10],
                     })
             return out
-        except Exception as e:  # noqa: BLE001 — any failure degrades to synthetic, never breaks inference
+        except Exception as e:  # noqa: BLE001 — any failure degrades to physics-only, never breaks inference
             print(f"[SentinelClient] statistics query failed: {e}")
             return []
 

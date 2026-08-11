@@ -12,8 +12,8 @@ __pycache__/
 .DS_Store
 .env
 
+.cache/
+data/
 mlruns/
 mlflow.db
 *.csv
-farmerxential_features.pkl
-farmerxential_shap_explainer.pkl
