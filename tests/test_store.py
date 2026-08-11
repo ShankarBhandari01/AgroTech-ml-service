@@ -70,8 +70,24 @@ def test_feature_row_round_trip():
     assert all(isinstance(v, (int, float)) for v in restored.values())
 
 
+def test_expected_yield_treats_zero_as_missing():
+    """A zero survey yield must not zero out exposure — see pipeline._expected_yield."""
+    from types import SimpleNamespace
+
+    from argotech.serving.pipeline import PredictionsService
+
+    unfilled = SimpleNamespace(yield_value=0.0)
+    reported = SimpleNamespace(yield_value=2.4)
+    absent = SimpleNamespace(yield_value=None)
+
+    assert PredictionsService._expected_yield(unfilled, ndvi=0.5) > 0.0
+    assert PredictionsService._expected_yield(absent, ndvi=0.5) > 0.0
+    assert PredictionsService._expected_yield(reported, ndvi=0.5) == 2.4
+
+
 if __name__ == "__main__":
     test_is_fresh()
     test_context_round_trip()
     test_feature_row_round_trip()
+    test_expected_yield_treats_zero_as_missing()
     print("store self-check passed")

@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from types import SimpleNamespace
@@ -12,6 +14,7 @@ from argotech.models.registry import ModelManager
 from argotech.data.db import get_db
 from argotech.serving.pipeline import PredictionsService
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -32,8 +35,11 @@ async def predict_farmer(
 
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        # Log the detail, return a generic message: str(e) on a SQLAlchemy error is the entire
+        # statement plus parameters, and this response crosses a service boundary.
+        logger.exception("predict/farmer failed for %s", payload.farmer_id)
+        raise HTTPException(status_code=500, detail="Prediction failed. See ml service logs.")
 
 
 @router.post("/predict/coldstart", response_model=PredictionResponse)
@@ -92,7 +98,6 @@ async def predict_coldstart(
 
     except HTTPException:
         raise
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("predict/coldstart failed for (%s, %s)", payload.latitude, payload.longitude)
+        raise HTTPException(status_code=500, detail="Prediction failed. See ml service logs.")

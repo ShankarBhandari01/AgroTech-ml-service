@@ -13,6 +13,7 @@ terms. See docs/model-design.md §4.5.
 from __future__ import annotations
 
 import functools
+import uuid
 from typing import Any, Optional
 
 import pandas as pd
@@ -145,6 +146,14 @@ class PredictionsService:
     # ------------------------------------------------------------------ data
 
     async def _fetch_farmer_data(self):
+        # farmer_profiles.user_id is a uuid column, so a malformed id reaches Postgres as a cast
+        # error rather than an empty result — a 500 with the whole SQL statement in the response
+        # body. Reject it here as the not-found it actually is.
+        try:
+            uuid.UUID(str(self.data.farmer_id))
+        except (ValueError, AttributeError, TypeError):
+            raise HTTPException(404, f"Farmer '{self.data.farmer_id}' not found in database.")
+
         query = text("""
             SELECT
                 fp.user_id, fp.farm_size, fp.state, fp.latitude, fp.longitude, fp.crops,
@@ -315,7 +324,10 @@ class PredictionsService:
         which needs a season of harvest records that do not exist yet.
         """
         reported = getattr(farmer, "yield_value", None)
-        if reported is not None:
+        # A zero yield is an unfilled survey field, not a farm that harvests nothing. Taken
+        # literally it makes value_at_risk exactly 0, so a CRITICAL farm sorts to the *bottom* of a
+        # queue ranked by expected loss — the ranking inverts precisely for the farms that matter.
+        if reported is not None and float(reported) > 0:
             return float(reported)
         return round(max(0.5, min(5.0, 1.5 + (ndvi - 0.4) * 3.5)), 2)
 

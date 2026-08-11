@@ -211,9 +211,14 @@ def label_join(db: Session, horizon_days: int = 30) -> list[dict]:
                o.observed_at
         FROM predictions p
         JOIN field_outcomes o
-          ON o.field_id = p.field_id
-         AND o.observed_at BETWEEN p.predicted_at
-                              AND p.predicted_at + make_interval(days => :h)
+          -- An explicit prediction_id always wins: when an agent says which forecast they were
+          -- checking, that link is ground truth and must not be second-guessed by a time window.
+          -- The window only rescues unlinked reports (a spontaneous field visit, an SMS).
+          ON o.prediction_id = p.id
+          OR (o.prediction_id IS NULL
+              AND o.field_id = p.field_id
+              AND o.observed_at BETWEEN p.predicted_at
+                                   AND p.predicted_at + make_interval(days => :h))
         ORDER BY p.predicted_at
     """), {"h": horizon_days}).fetchall()
     return [dict(r._mapping) for r in rows]
