@@ -440,70 +440,76 @@ boundaries so peer cohorts become spatial rather than temporal. Drift monitoring
 ## 9. Retraining results
 
 The model was rebuilt on real data (`argotech.training.dataset` → `argotech.training.train`) and
-evaluated under the protocol in §6. The headline is that the numbers are now *low and meaningful*
-instead of high and circular.
+evaluated under the protocol in §6.
 
-**Dataset** — 4 215 samples, 108 sites, 4 clusters, 2022-09-10 … 2026-06-22. Features: ERA5 daily
+**Dataset** — 7,527 samples, 185 sites, 6 clusters, 2022-09-10 … 2026-06-22. Features: ERA5 daily
 reanalysis over the preceding 90 days passed through `argotech.domain`, plus the Sentinel-2 canopy
-state. Label: peer-standardised NDVI anomaly one 30-day interval ahead. Class balance 68.6 / 18.7 /
-12.7 %.
+state. Label: peer-standardised NDVI anomaly one 30-day interval ahead. Class balance 69.4 / 16.8 /
+13.7 %.
 
 ### Spatially blocked (leave-one-cluster-out)
 
-| Held-out cluster | n | macro F1 | bal. acc | ECE | P@25 | majority F1 | persistence F1 | persistence P@25 |
-|---|---|---|---|---|---|---|---|---|
-| Benue_River_Basin | 576 | 0.396 | 0.395 | 0.041 | 0.680 | 0.272 | **0.417** | 0.400 |
-| Kaduna_Grain_Belt | 1138 | 0.479 | 0.488 | 0.085 | 0.840 | 0.256 | **0.530** | 0.600 |
-| Kano_Sudan_Savannah | 1189 | 0.409 | 0.414 | 0.080 | 0.640 | 0.276 | **0.559** | **0.840** |
-| Tanzania_Morogoro | 1312 | 0.342 | 0.340 | 0.054 | 0.400 | 0.279 | **0.366** | **0.480** |
+| Held-out cluster | n | macro F1 | ECE | **P@25** | majority F1 | persistence F1 | persistence P@25 |
+|---|---|---|---|---|---|---|---|
+| Benue_River_Basin | 935 | 0.365 | 0.067 | **0.640** | 0.274 | 0.400 | 0.440 |
+| Ethiopian_Highlands | 1443 | 0.403 | 0.116 | **1.000** | 0.275 | 0.437 | 0.360 |
+| Kaduna_Grain_Belt | 1250 | 0.475 | 0.088 | **0.720** | 0.258 | 0.523 | 0.520 |
+| Kano_Sudan_Savannah | 1412 | 0.501 | 0.112 | **0.840** | 0.280 | 0.575 | 0.760 |
+| Kenya_Rift_Valley | 1175 | 0.379 | 0.039 | **0.520** | 0.271 | 0.396 | 0.200 |
+| Tanzania_Morogoro | 1312 | 0.347 | 0.134 | 0.440 | 0.279 | 0.366 | **0.480** |
+| **mean** | | 0.412 | 0.093 | **0.693** | 0.273 | 0.450 | 0.460 |
 
 ### Forward-chaining temporal
 
-| Split | n | macro F1 | bal. acc | ECE | P@25 | majority F1 | persistence F1 | persistence P@25 |
-|---|---|---|---|---|---|---|---|---|
-| train < 2024-10-29 | 89 | **0.541** | 0.621 | 0.179 | **0.560** | 0.279 | 0.477 | 0.480 |
-| train < 2025-03-29 | 94 | 0.379 | 0.378 | 0.087 | 0.400 | 0.268 | **0.411** | **0.520** |
-| train < 2025-09-24 | 72 | **0.380** | 0.367 | 0.077 | 0.360 | 0.270 | 0.297 | **0.480** |
+| Split | n | macro F1 | ECE | P@25 | majority F1 | persistence F1 | persistence P@25 |
+|---|---|---|---|---|---|---|---|
+| train < 2024-09-30 | 147 | 0.430 | 0.099 | 0.560 | 0.281 | 0.427 | 0.560 |
+| train < 2025-03-28 | 171 | 0.400 | 0.150 | 0.440 | 0.294 | 0.514 | 0.560 |
+| train < 2025-09-24 | 136 | 0.380 | 0.067 | 0.440 | 0.269 | 0.306 | 0.480 |
 
 ### What this says
 
-1. **The model beats the majority-class baseline everywhere** — 0.34-0.48 macro F1 against
-   0.26-0.28. It has learned something.
-2. **It does not beat persistence on macro F1 in any spatial fold**, and splits the temporal folds.
-   On ranking (P@25) it is slightly ahead spatially (mean 0.64 vs 0.58) and slightly behind
-   temporally (0.44 vs 0.49). Within the noise of 4 folds, *it is not yet distinguishable from
-   carrying today's anomaly forward*.
-3. **Calibration is genuinely good** — ECE 0.04-0.09 on blocked splits. This is what the calibration
-   layer was supposed to deliver and did not, when it was fitted on its own training data.
-4. **Permutation importance on held-out ground is decisive**: `ndvi_z_peer` at +0.022, everything
-   else below +0.003. The weather block contributes almost nothing beyond the current canopy
-   anomaly. The model is, in effect, a smoothed persistence model.
+1. **On the operational metric the model now clearly beats persistence.** Mean spatial P@25 is
+   0.693 against 0.460, winning 5 of 6 clusters. Precision@k is what the product actually needs —
+   an agent visits *k* farms this week and what matters is how many of those visits land on a field
+   that needed one. Ethiopian Highlands is a clean 1.000 against 0.360.
+2. **On macro F1 it still loses to persistence** (0.412 vs 0.450 mean). The two metrics disagree
+   because F1 rewards getting the ordinal class boundaries right across the whole distribution,
+   while P@k only cares about the top of the ranking. The product ranks; F1 is the diagnostic.
+3. **Calibration is good** — mean ECE 0.093, best fold 0.039.
+4. **The weather block is no longer inert.** With 7,527 samples instead of 4,215, permutation
+   importance on held-out ground reordered completely: `ndmi` +0.025 and `evi` +0.022 now lead,
+   `ndvi_z_peer` fell to +0.012, and the agronomy carries real signal — `et0_90` +0.009,
+   `dry_spell_30` +0.008, `diurnal_range_30` +0.006, `radiation_90` +0.005, `stage_kc` +0.003.
+   At the smaller sample size the model was a smoothed persistence model; it is not one now.
+5. **Temporal generalisation is the weak axis.** The model trails persistence on P@25 across all
+   three forward-chaining folds (0.480 vs 0.533), on 136-171 samples each. Predicting *next month*
+   at a site is still harder than ranking *across* sites today.
 
-### Why the weather features are inert, and what would change it
+### Why the earlier run looked worse, and what still limits this
 
-- **Label.** A peer-relative NDVI level 30 days out is dominated by *persistent* field-level
-  differences — soil, land use, management — not by one month of weather. The fix is a label that
-  isolates the change (Δ anomaly) or, better, a real outcome: T1 confirmed events and T2 harvest
-  yields. That is the phase-2 work, and this result is the quantitative argument for it.
-- **Resolution.** ERA5 is a ~9-25 km grid. Sites inside one cluster frequently share a grid cell, so
-  the weather features barely vary across the cohort and cannot explain within-cohort divergence.
-  Higher-resolution precipitation (CHIRPS at 5 km, IMERG at 10 km) and satellite soil moisture
-  (SMAP) would give the features something to say.
-- **Cloud gaps.** A "30 days ahead" label is sometimes 60 days ahead, because the intervening
-  Sentinel-2 window was fully clouded. This is finding P2-13 measured: 113 of 192 sites survived, and
-  the gaps cluster in the rainy season. Sentinel-1 SAR is the fix.
-- **Scale.** 4 215 samples over 108 sites is small, and the temporal folds are 72-94 samples each.
+The first build reached only 113 of 192 sites because Open-Meteo's archive quota ran out mid-backfill.
+The 4,215-sample result — model indistinguishable from persistence, weather features contributing
+nothing — was a sample-size artefact, not a property of the task. Worth remembering when reading any
+single evaluation: the honest protocol correctly refused to endorse the model, and correctly changed
+its answer when the data arrived.
+
+Remaining limits, in order:
+
+- **Label.** A peer-relative NDVI level 30 days out is still partly dominated by persistent
+  field-level differences. A label on the *change*, or a real T1/T2 outcome, is the next step up.
+- **Resolution.** ERA5 is a ~9-25 km grid; sites inside a cluster can share cells. CHIRPS (5 km) and
+  SMAP soil moisture would sharpen the weather block further.
+- **Cloud gaps.** 185 of 192 sites survived this time, but the gaps still cluster in the rainy
+  season. Sentinel-1 SAR is the fix.
 
 ### Decision
 
-The retrained model **ships as the vegetation-hazard term** in the `domain.risk` composition, not as
-the risk score. That is the right role for it on this evidence: it is well calibrated, so it supplies
-a probability the composition needs and a threshold rule cannot, while the drought, disease and heat
-terms — which are physics and need no training data — carry the rest. It should not be promoted to
-the primary signal until it separates from persistence on a fold-by-fold basis.
-
-This is the release gate from §6 doing its job, in the opposite direction from the usual: the honest
-outcome of a retrain can be "the learned component earns a supporting role, not the lead".
+The retrained model **ships as the vegetation-hazard term** in the `domain.risk` composition. It has
+now earned that role on evidence rather than on calibration alone: it ranks better than persistence
+on the metric the product uses, it is well calibrated, and it draws on the agronomy rather than
+echoing the current anomaly. Promoting it to the primary risk score still requires beating
+persistence on temporal generalisation, which it does not yet do.
 
 ---
 

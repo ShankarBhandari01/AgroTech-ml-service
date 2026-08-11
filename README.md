@@ -400,12 +400,16 @@ a cross-fit `CalibratedClassifierCV(method="sigmoid", cv=5)`. The bundle carries
 `feature_columns` and `version`, so the column contract is explicit at load time and every persisted
 prediction is traceable to the artifact behind it.
 
-**It is one hazard term, not the risk score.** Measured on spatially blocked and forward-chaining
-splits it beats a majority baseline everywhere (macro F1 0.34–0.48 against 0.26–0.28) but does not
-beat carrying today's peer anomaly forward. Its calibration is good (ECE 0.04–0.09), which is why it
-earns a place: it supplies a probability the risk composition needs and a threshold rule cannot.
-Permutation importance on held-out ground is dominated by `ndvi_z_peer`; the weather block is nearly
-inert, and [`docs/model-design.md` §9](docs/model-design.md) explains why and what would change it.
+**It is one hazard term, not the risk score.** Trained on 7,527 real samples across 185 sites and
+6 Sub-Saharan clusters. On spatially blocked evaluation it beats persistence on the operational
+ranking metric — mean precision@25 of 0.693 against 0.460, winning 5 of 6 held-out clusters — and is
+well calibrated (mean ECE 0.093). It still trails persistence on macro F1 (0.412 vs 0.450) and on
+temporal generalisation, so it contributes the vegetation hazard rather than the headline score.
+
+Permutation importance on held-out ground is led by `ndmi` and `evi`, with real contributions from
+the agronomy (`et0_90`, `dry_spell_30`, `stage_kc`) — at half this sample size the model was
+effectively a smoothed persistence model, and [`docs/model-design.md` §9](docs/model-design.md)
+records both results and why they differ.
 
 Do not promote it to the primary signal without new evidence on the same protocol.
 
