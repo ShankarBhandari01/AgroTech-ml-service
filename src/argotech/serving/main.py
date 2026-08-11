@@ -9,6 +9,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from argotech.serving.api.crop_health import router as crop_health_router
+from argotech.serving.api.outcomes import router as outcomes_router
 from argotech.serving.api.predict import router as predict_router
 
 # Set up OpenTelemetry Tracing. The exporter is opt-in via OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:
@@ -29,6 +30,7 @@ FastAPIInstrumentor.instrument_app(app)
 
 app.include_router(predict_router)
 app.include_router(crop_health_router)
+app.include_router(outcomes_router)
 
 
 @app.get("/health")

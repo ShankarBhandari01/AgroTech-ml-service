@@ -20,7 +20,11 @@ class ModelManager:
         self._agronomic = None
 
     def agronomic_model(self):
-        """`(model, feature_columns)` for the agronomic risk model, cached in-process."""
+        """`(model, feature_columns, version)` for the agronomic risk model, cached in-process.
+
+        The version travels into every persisted prediction, so a stored row can always be traced
+        back to the artifact that produced it.
+        """
         if self._agronomic is None:
             path = settings.AGRONOMIC_MODEL_PATH
             if not os.path.exists(path):
@@ -28,6 +32,7 @@ class ModelManager:
                     f"Agronomic model '{path}' not found. Build it with "
                     "`python -m argotech.training.dataset` then `python -m argotech.training.train`.")
             bundle = joblib.load(path)
-            self._agronomic = (bundle["model"], bundle["feature_columns"])
-            print(f"Loaded agronomic model: {bundle['n_samples']} samples, {bundle['trained_on']}")
+            version = bundle.get("version") or f"n{bundle['n_samples']}@{bundle['trained_on']}"
+            self._agronomic = (bundle["model"], bundle["feature_columns"], version)
+            print(f"Loaded agronomic model {version}")
         return self._agronomic

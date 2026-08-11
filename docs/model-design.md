@@ -507,7 +507,53 @@ outcome of a retrain can be "the learned component earns a supporting role, not 
 
 ---
 
-## 10. Implemented in this branch
+## 10. Serving architecture: batch features + audit trail
+
+Two changes that make the rest of the roadmap possible.
+
+### Features off the request path
+
+`argotech.jobs.precompute` runs nightly, single-instance, and writes one `field_features` row per
+registered field. `/predict` reads that row; it falls back to computing live only when no fresh row
+exists (a field registered this morning still gets a prediction today, it just pays the latency
+once). `field_features.computed_at` older than 48 h is refused rather than served.
+
+Both paths call the *same* `pipeline.gather_upstream`, which is what makes a precomputed prediction
+and a live one the same computation — verified by a parity check that round-trips a real
+`gather_upstream` result through JSON and asserts byte-identical responses.
+
+Why it matters: every prediction previously made three blocking calls to two free public APIs, one
+of which (the 4-year rainfall climatology) took seconds on a cache miss. A single training backfill
+exhausted Open-Meteo's daily quota; at farmer volume that is a daily outage. Batching also bounds
+the upstream call rate to one pass per field per night instead of unbounded fan-out driven by
+traffic.
+
+The job reports a `degraded_rate` — the share of fields with no cloud-free Sentinel-2 scene, and so
+no canopy signal and no learned-model contribution. That is the quality metric to alert on, and it
+is invisible in any conventional latency/error dashboard.
+
+```
+0 2 * * *  python -m argotech.jobs.precompute        # nightly, one instance
+```
+
+### Predictions and outcomes
+
+`predictions` stores every prediction with the exact feature vector, model version and
+`feature_source` that produced it, so a decision can be explained after the fact, reproduced, and
+joined to what happened. The response carries the row's `prediction_id`.
+
+`POST /outcomes` takes that id back with what an agent found, what was diagnosed, or what was
+harvested. `store.label_join` is the query that pairs them. `GET /outcomes/label-count` exposes the
+count, because "how many labels do we have" is the number that decides when phase 3 becomes
+possible and it should be on a dashboard, not discovered by a quarterly query.
+
+Persistence never fails a prediction: losing the audit row is bad, refusing the farmer's forecast
+because the audit table is unavailable is worse. If the job has never run and the tables do not
+exist, predictions still serve and the write is logged and skipped.
+
+---
+
+## 11. Implemented in this branch
 
 - **Retrained model** — `argotech/training/dataset.py` rebuilt from scratch: real ERA5 + Sentinel-2,
   90-day feature window, 30-day-ahead peer-standardised label, documented leakage controls.

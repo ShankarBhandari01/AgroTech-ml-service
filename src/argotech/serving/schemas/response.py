@@ -76,6 +76,13 @@ class MicroclimateMetrics(BaseModel):
 
 class PredictionResponse(BaseModel):
     field_id: str
+    # Handle for the audit row. Pass it back on POST /outcomes to link what happened to what was
+    # predicted — this is the join that produces training labels.
+    prediction_id: Optional[int] = None
+    model_version: str = "none"
+    # "precomputed" when served from the nightly feature table, "live" when computed in-request.
+    feature_source: str = "live"
+    features_computed_at: Optional[datetime] = None
     crop_type: str
     phenology_stage: str
     prediction: int

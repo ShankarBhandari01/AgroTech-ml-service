@@ -22,7 +22,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from argotech.data import meteo
+from argotech.data import meteo, store
 from argotech.data.sentinel import sentinel_client
 from argotech.domain import agronomy, indices, risk
 from argotech.features.agronomic import WINDOW_DAYS, build, satellite_block
@@ -46,6 +46,94 @@ OPEN_METEO_TIMEOUT_SECONDS = 6
 # expressed in currency at all; wire it to a market-price feed when one exists.
 FARMGATE_PRICE_USD_PER_T = {"maize": 250.0, "sorghum": 230.0, "rice": 420.0, "cassava": 120.0}
 DEFAULT_PRICE_USD_PER_T = 250.0
+
+
+def _leaf_wetness(lat: float, lon: float) -> list:
+    """Per-day (mean temperature during the wet period, wet hours) from hourly Open-Meteo.
+
+    The disease model needs sub-daily resolution — leaf wetness duration is the input, and a daily
+    mean humidity cannot express it. One hourly call, separate from the daily call that feeds the
+    model features.
+    """
+    url = (f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+           f"&hourly=temperature_2m,relative_humidity_2m&past_days=14&forecast_days=1&timezone=UTC")
+    try:
+        res = requests.get(url, timeout=OPEN_METEO_TIMEOUT_SECONDS)
+        res.raise_for_status()
+        hourly = res.json().get("hourly", {})
+        temps, rhs = hourly.get("temperature_2m", []), hourly.get("relative_humidity_2m", [])
+    except Exception as e:  # noqa: BLE001
+        print(f"[pipeline] hourly weather unavailable: {e}")
+        return []
+
+    days = []
+    for start in range(0, len(temps) - 23, 24):
+        t_day = [t for t in temps[start:start + 24] if t is not None]
+        wet = [t for t, rh in zip(temps[start:start + 24], rhs[start:start + 24])
+               if t is not None and rh is not None and rh >= 90]
+        if wet:
+            days.append((sum(wet) / len(wet), len(wet)))
+        elif t_day:
+            days.append((sum(t_day) / len(t_day), 0))
+    return days
+
+
+async def gather_upstream(lat: float, lon: float, crop: str) -> tuple[dict, dict]:
+    """Every upstream call for one field, in one place: ERA5 daily, Sentinel-2 history, hourly leaf
+    wetness, and the 4-year rainfall climatology.
+
+    Returns `(feature_row, context)`. The nightly precompute job calls this and stores the result;
+    a request calls it only when no fresh stored row exists. Keeping one implementation is what
+    guarantees a precomputed prediction and a live one are the same computation.
+    """
+    payload = await run_in_threadpool(functools.partial(meteo.fetch_recent, lat, lon, 92))
+    history = await run_in_threadpool(sentinel_client.fetch_history, lat, lon, 365)
+    wet_days = await run_in_threadpool(_leaf_wetness, lat, lon)
+
+    if not payload:
+        raise HTTPException(503, "Weather upstream unavailable; cannot build features.")
+    daily = meteo.daily_frame(payload)
+    if len(daily["time"]) < WINDOW_DAYS:
+        raise HTTPException(503, "Insufficient weather history for the 90-day feature window.")
+
+    # ---- canopy state ----
+    crop_health = None
+    if history:
+        latest = history[-1]
+        series = [o["ndvi"] for o in history]
+        mean = sum(series) / len(series)
+        sat = satellite_block(latest, series[:-1], series[:-1])
+        crop_health = indices.crop_health_index(
+            current_ndvi=latest["ndvi"], ndmi_value=latest["ndwi"],
+            ndvi_min=min(series), ndvi_max=max(series),
+            peer_mean=mean,
+            peer_std=(sum((v - mean) ** 2 for v in series) / len(series)) ** 0.5,
+        ).as_dict()
+        index_source, sensing_date = "sentinel-2", latest["sensing_date"]
+    else:
+        # No cloud-free scene. Rather than invent indices, mark the canopy block unavailable and let
+        # the physical hazards carry the assessment — they need no satellite at all.
+        sat = {"ndvi": 0.0, "ndmi": 0.0, "evi": 0.0, "vci": 50.0, "ndvi_z_peer": 0.0}
+        index_source, sensing_date = "unavailable", None
+
+    # ---- feature row (identical builder to training) ----
+    clim = await run_in_threadpool(meteo.climatological_rain_30, lat, lon, daily["time"][-1][5:])
+    site = {"latitude": lat, "longitude": lon,
+            "elevation": payload.get("elevation", 0.0),
+            "clim_rain_30": clim if clim is not None else sum(daily["precipitation_sum"][-30:])}
+    row = build(daily, sat, site, crop)
+
+    dsv_total, spray_due = agronomy.accumulate_dsv(
+        [agronomy.daily_severity_value(t, h) for t, h in wet_days])
+
+    return row, {
+        "sat": sat,
+        "index_source": index_source,
+        "sensing_date": sensing_date,
+        "crop_health": crop_health,
+        "dsv_total": dsv_total,
+        "spray_due": spray_due,
+    }
 
 
 class PredictionsService:
@@ -78,37 +166,6 @@ class PredictionsService:
             raise HTTPException(404, f"Farmer '{self.data.farmer_id}' not found in database.")
         return result
 
-    @staticmethod
-    def _leaf_wetness(lat: float, lon: float) -> list[tuple[float, int]]:
-        """Per-day (mean temperature during the wet period, wet hours) from hourly Open-Meteo.
-
-        The disease model needs sub-daily resolution — leaf wetness duration is the input, and a
-        daily mean humidity cannot express it. One hourly call, separate from the daily call that
-        feeds the model features.
-        """
-        url = (f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
-               f"&hourly=temperature_2m,relative_humidity_2m&past_days=14&forecast_days=1&timezone=UTC")
-        try:
-            res = requests.get(url, timeout=OPEN_METEO_TIMEOUT_SECONDS)
-            res.raise_for_status()
-            hourly = res.json().get("hourly", {})
-            temps, rhs = hourly.get("temperature_2m", []), hourly.get("relative_humidity_2m", [])
-        except Exception as e:  # noqa: BLE001
-            print(f"[pipeline] hourly weather unavailable: {e}")
-            return []
-
-        days = []
-        for start in range(0, len(temps) - 23, 24):
-            t_day = [t for t in temps[start:start + 24] if t is not None]
-            rh_day = rhs[start:start + 24]
-            wet = [t for t, rh in zip(temps[start:start + 24], rh_day)
-                   if t is not None and rh is not None and rh >= 90]
-            if wet:
-                days.append((sum(wet) / len(wet), len(wet)))
-            elif t_day:
-                days.append((sum(t_day) / len(t_day), 0))
-        return days
-
     # ------------------------------------------------------------------ inference
 
     async def predict(self) -> PredictionResponse:
@@ -119,49 +176,29 @@ class PredictionsService:
         if lat is None or lon is None:
             raise HTTPException(422, "Prediction requires latitude and longitude.")
         lat, lon = float(lat), float(lon)
-
         crop = self._crop_name(farmer)
-        payload = await run_in_threadpool(functools.partial(meteo.fetch_recent, lat, lon, 92))
-        history = await run_in_threadpool(sentinel_client.fetch_history, lat, lon, 365)
-        wet_days = await run_in_threadpool(self._leaf_wetness, lat, lon)
+        field_id = self.data.farmer_id
 
-        if not payload:
-            raise HTTPException(503, "Weather upstream unavailable; cannot build features.")
-        daily = meteo.daily_frame(payload)
-        if len(daily["time"]) < WINDOW_DAYS:
-            raise HTTPException(503, "Insufficient weather history for the 90-day feature window.")
-
-        # ---- canopy state -------------------------------------------------
-        crop_health: Optional[indices.CropHealth] = None
-        if history:
-            latest = history[-1]
-            series = [o["ndvi"] for o in history]
-            sat = satellite_block(latest, series[:-1], series[:-1])
-            crop_health = indices.crop_health_index(
-                current_ndvi=latest["ndvi"], ndmi_value=latest["ndwi"],
-                ndvi_min=min(series), ndvi_max=max(series),
-                peer_mean=sum(series) / len(series),
-                peer_std=(sum((v - sum(series) / len(series)) ** 2 for v in series) / len(series)) ** 0.5,
-            )
-            index_source, sensing_date = "sentinel-2", latest["sensing_date"]
+        # Precomputed row when the nightly job has produced a fresh one, live upstream otherwise.
+        # The fallback is deliberately kept: a new field registered this morning still gets a
+        # prediction today, it just pays the latency once.
+        cached = store.read_latest_features(self.db, field_id) if self.db is not None else None
+        if cached:
+            row, ctx, feature_source = cached["features"], cached["context"], "precomputed"
         else:
-            # No cloud-free scene. Rather than invent indices, mark the canopy block unavailable and
-            # let the physical hazards carry the assessment — they need no satellite at all.
-            sat = {"ndvi": 0.0, "ndmi": 0.0, "evi": 0.0, "vci": 50.0, "ndvi_z_peer": 0.0}
-            index_source, sensing_date = "unavailable", None
+            row, ctx = await gather_upstream(lat, lon, crop)
+            feature_source = "live"
 
-        # ---- feature row (identical builder to training) -------------------
-        target_mmdd = daily["time"][-1][5:]
-        clim = await run_in_threadpool(meteo.climatological_rain_30, lat, lon, target_mmdd)
-        site = {"latitude": lat, "longitude": lon,
-                "elevation": payload.get("elevation", 0.0),
-                "clim_rain_30": clim if clim is not None else sum(daily["precipitation_sum"][-30:])}
-        row = build(daily, sat, site, crop)
+        sat = ctx["sat"]
+        index_source = ctx["index_source"]
+        crop_health = ctx.get("crop_health")
+        dsv_total, spray_due = ctx["dsv_total"], ctx["spray_due"]
 
         # ---- learned vegetation hazard ------------------------------------
         vegetation_hazard, probabilities = 0.0, None
+        model_version = "none"
         if index_source == "sentinel-2":
-            model, columns = self.model_manager.agronomic_model()
+            model, columns, model_version = self.model_manager.agronomic_model()
             proba = await run_in_threadpool(model.predict_proba, pd.DataFrame([row])[columns])
             p = proba[0]
             # Expected severity on 0-1: the ranking score, and the term fed into the composition.
@@ -170,9 +207,7 @@ class PredictionsService:
                                                     medium=round(float(p[1]), 3),
                                                     high=round(float(p[2]), 3))
 
-        # ---- physical hazards ---------------------------------------------
-        dsv_total, spray_due = agronomy.accumulate_dsv(
-            [agronomy.daily_severity_value(t, h) for t, h in wet_days])
+        # ---- composition ---------------------------------------------------
         hazard = risk.assess_hazard(
             water_satisfaction=row["water_satisfaction_30"],
             dry_spell_days=row["dry_spell_30"],
@@ -180,7 +215,6 @@ class PredictionsService:
             heat_days=row["heat_stress_days"],
             vegetation=vegetation_hazard,
         )
-
         exposure = risk.assess_exposure(
             area_ha=self._parse_farm_size(farmer.farm_size),
             expected_yield_t_ha=self._expected_yield(farmer, sat["ndvi"]),
@@ -189,6 +223,15 @@ class PredictionsService:
         vulnerability = risk.assess_vulnerability(self._coping_signals(farmer))
         assessment = risk.assess_risk(hazard, exposure, vulnerability)
 
+        # ---- audit row -----------------------------------------------------
+        # Written before the response is returned so the id can be handed back: the agent app links
+        # its outcome report to this prediction, which is what turns advisories into training data.
+        prediction_id = None
+        if self.db is not None:
+            prediction_id = store.write_prediction(
+                self.db, field_id, model_version, feature_source, row, assessment,
+                probabilities.model_dump() if probabilities else None)
+
         # ---- response ------------------------------------------------------
         severity_to_class = {"NORMAL": 0, "WATCH": 0, "ELEVATED": 1, "CRITICAL": 2}
         pred_val = severity_to_class[assessment.severity]
@@ -196,7 +239,11 @@ class PredictionsService:
         drivers = self._drivers(row, hazard, vulnerability, dsv_total, spray_due, crop_health)
 
         return PredictionResponse(
-            field_id=self.data.farmer_id,
+            field_id=field_id,
+            prediction_id=prediction_id,
+            model_version=model_version,
+            feature_source=feature_source,
+            features_computed_at=cached["computed_at"] if cached else None,
             crop_type=crop,
             phenology_stage=stage,
             prediction=pred_val,
@@ -218,12 +265,12 @@ class PredictionsService:
                 hazard=HazardDetail(**hazard.as_dict()),
                 vulnerability=VulnerabilityDetail(**vulnerability.as_dict()),
             ),
-            crop_health=CropHealthDetail(**crop_health.as_dict()) if crop_health else None,
+            crop_health=CropHealthDetail(**crop_health) if crop_health else None,
             spatiotemporal_indices=SpatiotemporalIndices(
                 ndvi=round(sat["ndvi"], 3), ndwi=round(sat["ndmi"], 3), evi=round(sat["evi"], 3),
                 vci=round(sat["vci"], 1),
-                canopy_stress_status=crop_health.status if crop_health else "Unavailable",
-                source=index_source, sensing_date=sensing_date,
+                canopy_stress_status=crop_health["status"] if crop_health else "Unavailable",
+                source=index_source, sensing_date=ctx.get("sensing_date"),
             ),
             microclimate_metrics=MicroclimateMetrics(
                 water_satisfaction_30d=row["water_satisfaction_30"],
@@ -307,8 +354,8 @@ class PredictionsService:
         if hazard.vegetation > 0.35:
             out.append(f"Model projects canopy stress relative to peers within 30 days "
                        f"(hazard {hazard.vegetation:.2f})")
-        if crop_health and crop_health.score < 45:
-            out.append(f"Crop Health Index {crop_health.score:.0f}/100 — {crop_health.status}")
+        if crop_health and crop_health["score"] < 45:
+            out.append(f"Crop Health Index {crop_health['score']:.0f}/100 — {crop_health['status']}")
         if row["rain_anomaly_30"] < -20:
             out.append(f"Rainfall {abs(row['rain_anomaly_30']):.0f} mm below the site's normal "
                        f"for this time of year")

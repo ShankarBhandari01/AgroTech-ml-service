@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import joblib
@@ -285,8 +286,10 @@ def main() -> None:
     print(classification_report(holdout.label, decide(held_risk, y_all), zero_division=0, digits=3))
 
     ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
+    version = f"agro-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
     joblib.dump({
         "model": final,
+        "version": version,
         "feature_columns": FEATURE_COLUMNS,
         "classes": [0, 1, 2],
         "label": "peer-standardised NDVI anomaly 30 days ahead",
@@ -302,7 +305,7 @@ def main() -> None:
         "n_samples": int(len(df)),
         "class_balance": df.label.value_counts(normalize=True).sort_index().round(4).to_dict(),
     }, indent=2, default=str))
-    print(f"Saved {ARTIFACT} and {METRICS}")
+    print(f"Saved {ARTIFACT} ({version}) and {METRICS}")
 
 
 if __name__ == "__main__":
