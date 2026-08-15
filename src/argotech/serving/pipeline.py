@@ -372,7 +372,7 @@ class PredictionsService:
             out.append(f"Rainfall {abs(row['rain_anomaly_30']):.0f} mm below the site's normal "
                        f"for this time of year")
         for gap in vulnerability.gaps[:2]:
-            out.append(f"Limited coping capacity: {gap.replace('_', ' ')}")
+            out.append(risk.describe_gap(gap))
         return out or ["No critical stress drivers detected"]
 
     @staticmethod

@@ -142,6 +142,31 @@ COPING_FACTORS = {
     "market_access": 0.6,    # normalised 0-1 upstream
 }
 
+# What a *gap* in each factor means, in words an extension officer can act on.
+#
+# Kept beside COPING_FACTORS so adding a factor without wording is an obvious omission rather than a
+# silent fallback. The previous fallback derived the phrase mechanically from the field name, which
+# inverted the meaning: a missing `has_irrigation` rendered as "Limited coping capacity: has
+# irrigation", i.e. it read as though *having* irrigation were the problem.
+COPING_GAP_LABELS = {
+    "has_irrigation": "No irrigation available",
+    "has_extension_access": "No contact with an extension officer",
+    "received_credit": "No access to credit",
+    "used_fertilizer": "No fertiliser applied",
+    "crop_diversity": "Little crop diversification",
+    "asset_score": "Few productive assets",
+    "market_access": "Poor market access",
+}
+
+
+def describe_gap(factor: str) -> str:
+    """Human wording for a coping-capacity gap. Falls back to naming the factor as *missing*.
+
+    The fallback still cannot invert the meaning, which is the property that matters: an unlabelled
+    factor reads as "Missing: <factor>", never as though the farmer had it.
+    """
+    return COPING_GAP_LABELS.get(factor, f"Missing: {factor.replace('_', ' ')}")
+
 
 @dataclass
 class Vulnerability:

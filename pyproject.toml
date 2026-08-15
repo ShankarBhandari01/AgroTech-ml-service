@@ -29,8 +29,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Training-only.
-train = ["pyarrow"]   # parquet for the built training set
+# Training-only. Deliberately not in `dependencies`: torch is ~200 MB and the serving image has no
+# use for it. Frozen Presto embeddings are computed offline by `argotech.training.embed`, so only a
+# training box — or the nightly precompute job, if embeddings are ever promoted — needs this extra.
+#
+# Presto itself is vendored (`models/_presto_vendored.py`) rather than installed: the published
+# package pins torch==2.0 and numpy==1.23.5 and imports earthengine-api at package init, so it
+# cannot be installed alongside this project even with --no-deps.
+train = [
+  "pyarrow",   # parquet for the built training set
+  "torch",     # frozen Presto encoder only; no training, no GPU
+  "einops",    # required by the vendored Presto file
+]
 dev = ["pytest", "ruff"]
 
 [tool.setuptools.packages.find]

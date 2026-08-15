@@ -23,6 +23,7 @@ model artifact (`feature_columns`), so the ordering is enforced at load time whe
 from __future__ import annotations
 
 import json
+from math import isfinite
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -104,6 +105,34 @@ def is_fresh(computed_at: Optional[datetime], now: Optional[datetime] = None,
     return timedelta(0) <= now - computed_at <= max_age
 
 
+def _jsonb(payload, **kwargs) -> str:
+    """Serialise for a JSONB column, mapping non-finite floats to `null`.
+
+    `json.dumps` emits bare `NaN` / `Infinity` literals. Python accepts them on the way back in;
+    the JSON spec does not contain them, and Postgres rejects the whole statement with
+    "invalid input syntax for type json".
+
+    This is not hypothetical. A feature that is legitimately absent — a radar band for a field with
+    no Sentinel-1 pass, a canopy index under cloud — is NaN by design, because the alternative is
+    fabricating a value. The moment such a feature entered `FEATURE_COLUMNS`, every prediction
+    write began failing, and `write_prediction` swallows its exception on purpose so that a broken
+    audit table cannot break a farmer's prediction. The result was a service that looked healthy
+    and silently stopped recording the outcomes the whole training roadmap depends on.
+
+    `null` is the right mapping, not 0.0: it means "not observed", which is exactly what NaN meant.
+    """
+    def clean(value):
+        if isinstance(value, float) and not isfinite(value):
+            return None
+        if isinstance(value, dict):
+            return {k: clean(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [clean(v) for v in value]
+        return value
+
+    return json.dumps(clean(payload), **kwargs)
+
+
 # ------------------------------------------------------------------ features
 
 def write_features(db: Session, field_id: str, lat: float, lon: float, crop: str,
@@ -113,7 +142,7 @@ def write_features(db: Session, field_id: str, lat: float, lon: float, crop: str
         VALUES (:field_id, :lat, :lon, :crop, CAST(:features AS JSONB), CAST(:context AS JSONB))
         ON CONFLICT (field_id, computed_at) DO NOTHING
     """), {"field_id": field_id, "lat": lat, "lon": lon, "crop": crop,
-           "features": json.dumps(features), "context": json.dumps(context, default=str)})
+           "features": _jsonb(features), "context": _jsonb(context, default=str)})
     db.commit()
 
 
@@ -162,14 +191,14 @@ def write_prediction(db: Session, field_id: str, model_version: str, feature_sou
             "field_id": field_id,
             "model_version": model_version,
             "feature_source": feature_source,
-            "features": json.dumps(features),
+            "features": _jsonb(features),
             "risk_score": assessment.risk_score,
             "severity": assessment.severity,
             "dominant_hazard": assessment.hazard.dominant,
             "expected_loss": assessment.expected_loss,
-            "hazard": json.dumps(assessment.hazard.as_dict()),
-            "vulnerability": json.dumps(assessment.vulnerability.as_dict()),
-            "probabilities": json.dumps(probabilities) if probabilities else None,
+            "hazard": _jsonb(assessment.hazard.as_dict()),
+            "vulnerability": _jsonb(assessment.vulnerability.as_dict()),
+            "probabilities": _jsonb(probabilities) if probabilities else None,
         }).fetchone()
         db.commit()
         return int(row.id)

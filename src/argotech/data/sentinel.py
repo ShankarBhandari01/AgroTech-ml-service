@@ -15,6 +15,7 @@ event loop isn't blocked.
 from __future__ import annotations
 
 import math
+import random
 import threading
 import time
 from datetime import date, timedelta
@@ -43,6 +44,76 @@ function evaluatePixel(s) {
   let ndwi = (s.B08 - s.B11) / (s.B08 + s.B11);
   let evi  = 2.5 * (s.B08 - s.B04) / (s.B08 + 6.0 * s.B04 - 7.5 * s.B02 + 1.0);
   return { ndvi: [ndvi], ndwi: [ndwi], evi: [evi], dataMask: [s.dataMask] };
+}
+"""
+
+# Raw Sentinel-2 L2A band means, in the exact set Presto was pre-trained on (B1/B9/B10 are dropped
+# upstream by Presto itself, so they are not requested here). This is deliberately *separate* from
+# `_EVALSCRIPT`: the index evalscript is what the serving path and the tabular features use, and
+# reusing one script for both would couple a modelling experiment to the production feature cache.
+#
+# Values come back as L2A surface reflectance in [0, 1]. Presto normalises Earth Engine's 0-10000
+# integers by dividing by 1e4, so CDSE's float reflectance is already on Presto's scale and needs no
+# further scaling — see `embeddings.build_input`.
+_S2_BANDS_EVALSCRIPT = """
+//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["B02","B03","B04","B05","B06","B07","B08","B8A","B11","B12","dataMask"] }],
+    output: [
+      { id: "b02", bands: 1, sampleType: "FLOAT32" },
+      { id: "b03", bands: 1, sampleType: "FLOAT32" },
+      { id: "b04", bands: 1, sampleType: "FLOAT32" },
+      { id: "b05", bands: 1, sampleType: "FLOAT32" },
+      { id: "b06", bands: 1, sampleType: "FLOAT32" },
+      { id: "b07", bands: 1, sampleType: "FLOAT32" },
+      { id: "b08", bands: 1, sampleType: "FLOAT32" },
+      { id: "b8a", bands: 1, sampleType: "FLOAT32" },
+      { id: "b11", bands: 1, sampleType: "FLOAT32" },
+      { id: "b12", bands: 1, sampleType: "FLOAT32" },
+      { id: "dataMask", bands: 1 }
+    ]
+  };
+}
+function evaluatePixel(s) {
+  return {
+    b02: [s.B02], b03: [s.B03], b04: [s.B04], b05: [s.B05], b06: [s.B06],
+    b07: [s.B07], b08: [s.B08], b8a: [s.B8A], b11: [s.B11], b12: [s.B12],
+    dataMask: [s.dataMask]
+  };
+}
+"""
+
+S2_BAND_KEYS = ("b02", "b03", "b04", "b05", "b06", "b07", "b08", "b8a", "b11", "b12")
+
+# Sentinel-1 C-band backscatter. Radar sees through cloud, which is the entire reason this exists:
+# optical gaps cluster in exactly the rainy months when a drought or disease signal matters most.
+#
+#   RVI  = 4 * VH / (VV + VH)        Radar Vegetation Index, ~0 for bare soil, ~1 for dense canopy.
+#                                    Sensitive to canopy volume scattering, so it tracks biomass
+#                                    where NDVI tracks greenness — related but not redundant.
+#   VH/VV                            Cross- to co-polarised ratio; rises with vegetation structure
+#                                    and is less sensitive to incidence-angle geometry than VH alone.
+#
+# Linear power units (not dB) so the means are physically meaningful before averaging: averaging
+# decibels averages logarithms, which is not the mean backscatter.
+_S1_EVALSCRIPT = """
+//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["VV", "VH", "dataMask"] }],
+    output: [
+      { id: "vv",  bands: 1, sampleType: "FLOAT32" },
+      { id: "vh",  bands: 1, sampleType: "FLOAT32" },
+      { id: "rvi", bands: 1, sampleType: "FLOAT32" },
+      { id: "dataMask", bands: 1 }
+    ]
+  };
+}
+function evaluatePixel(s) {
+  let denom = s.VV + s.VH;
+  let rvi = denom > 0 ? (4.0 * s.VH) / denom : 0;
+  return { vv: [s.VV], vh: [s.VH], rvi: [rvi], dataMask: [s.dataMask] };
 }
 """
 
@@ -92,8 +163,40 @@ class SentinelClient:
         """
         return self._stats(lat, lon, days=days, interval="P30D", res_m=res_m)
 
-    def _stats(self, lat, lon, days: int, interval: str, res_m: int = 10) -> list[dict]:
-        """Aggregated index statistics per interval, oldest first. Empty list on any failure."""
+    def fetch_sar_history(self, lat, lon, days: int = 365, res_m: int = 20) -> list[dict]:
+        """Monthly Sentinel-1 backscatter observations for the last `days`, oldest first.
+
+        The cloud-gap fix. Optical coverage fails in the rainy season — precisely when a water-stress
+        or disease signal is most actionable — and radar does not care about cloud, so this returns a
+        canopy-structure observation for intervals where `fetch_history` returns nothing.
+
+        20 m default resolution rather than 10: S1 GRD is natively ~10x10 m ground range but speckle
+        makes single-pixel values noisy, and averaging over a coarser grid is the standard mitigation.
+        """
+        return self._stats(lat, lon, days=days, interval="P30D", res_m=res_m,
+                           collection="sentinel-1-grd", evalscript=_S1_EVALSCRIPT,
+                           keys=("vv", "vh", "rvi"), data_filter={})
+
+    def fetch_bands_history(self, lat, lon, days: int = 365, res_m: int = 60) -> list[dict]:
+        """Monthly raw Sentinel-2 band means, for the Presto embedding path only.
+
+        Not used by the serving features or the tabular training set — those consume the derived
+        indices from `fetch_history`. This exists because Presto's pre-training expects reflectance
+        in ten named bands, and an index cannot be inverted back into them.
+        """
+        return self._stats(lat, lon, days=days, interval="P30D", res_m=res_m,
+                           evalscript=_S2_BANDS_EVALSCRIPT, keys=S2_BAND_KEYS)
+
+    def _stats(self, lat, lon, days: int, interval: str, res_m: int = 10,
+               collection: str = "sentinel-2-l2a", evalscript: str = _EVALSCRIPT,
+               keys: tuple[str, ...] = ("ndvi", "ndwi", "evi"),
+               data_filter: dict | None = None) -> list[dict]:
+        """Aggregated statistics per interval, oldest first. Empty list on any failure.
+
+        Parameterised over collection/evalscript/outputs so Sentinel-1 and Sentinel-2 share one
+        request path, one token, one error contract and one retry story. The alternative — a second
+        near-identical method — is where the two silently drift apart.
+        """
         if not self.enabled or lat is None or lon is None:
             return []
         try:
@@ -101,43 +204,49 @@ class SentinelClient:
             d = 0.005  # ~500 m AOI half-width
             end = date.today()
             start = end - timedelta(days=days)
+            if data_filter is None:
+                data_filter = {"maxCloudCoverage": 40}
             body = {
                 "input": {
                     "bounds": {
                         "bbox": [lon - d, lat - d, lon + d, lat + d],
                         "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
                     },
-                    "data": [{"type": "sentinel-2-l2a", "dataFilter": {"maxCloudCoverage": 40}}],
+                    "data": [{"type": collection, "dataFilter": data_filter}],
                 },
                 "aggregation": {
                     "timeRange": {"from": f"{start}T00:00:00Z", "to": f"{end}T23:59:59Z"},
                     "aggregationInterval": {"of": interval},
-                    "evalscript": _EVALSCRIPT,
+                    "evalscript": evalscript,
                     "resx": res_m,
                     "resy": res_m,
                 },
             }
-            resp = requests.post(
-                settings.SENTINEL_STATS_URL,
-                json=body,
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=15,
-            )
+            # Retry on 429. A bulk backfill (165 sites x 4 years x 10 bands) hits the CDSE rate
+            # limit reliably, and without this the request fails, returns [], and the caller
+            # caches the empty list as though the site genuinely had no imagery. That poisoned
+            # 42% of a band fetch — concentrated in whole clusters, which is exactly the pattern
+            # that corrupts leave-one-cluster-out. Serving is unaffected: it makes one request at
+            # a time and never retries more than a request's own latency budget.
+            for attempt in range(5):
+                resp = requests.post(
+                    settings.SENTINEL_STATS_URL,
+                    json=body,
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=15,
+                )
+                if resp.status_code != 429:
+                    break
+                time.sleep(2 ** attempt + random.random())
             resp.raise_for_status()
             out = []
             # Keep only intervals that actually have valid stats (skip fully cloud-masked windows).
             for iv in resp.json().get("data", []):
                 outputs = iv.get("outputs", {})
-                ndvi = self._mean(outputs, "ndvi")
-                ndwi = self._mean(outputs, "ndwi")
-                evi = self._mean(outputs, "evi")
-                if ndvi is not None and ndwi is not None and evi is not None:
-                    out.append({
-                        "ndvi": ndvi,
-                        "ndwi": ndwi,
-                        "evi": evi,
-                        "sensing_date": str(iv.get("interval", {}).get("to", ""))[:10],
-                    })
+                values = {k: self._mean(outputs, k) for k in keys}
+                if all(v is not None for v in values.values()):
+                    values["sensing_date"] = str(iv.get("interval", {}).get("to", ""))[:10]
+                    out.append(values)
             return out
         except Exception as e:  # noqa: BLE001 — any failure degrades to physics-only, never breaks inference
             print(f"[SentinelClient] statistics query failed: {e}")

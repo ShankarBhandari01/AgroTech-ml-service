@@ -430,16 +430,66 @@ is the peer-standardised NDVI anomaly one 30-day interval *ahead* — a future s
 so no feature can determine its own target. Leakage controls are documented at the top of
 `argotech/training/dataset.py`.
 
+The builder also fetches **Sentinel-1 backscatter** (`.cache/sentinel_sar/`, keyed separately so it
+can be added without invalidating the optical cache). Radar sees through cloud, which is the point:
+optical gaps cluster in the rainy season. It is additive — a site with no S1 coverage still yields
+samples, with the radar block as NaN. To measure what it buys, ablate it on the same parquet:
+
+```bash
+python -m argotech.training.train --data data/training_set.parquet             # radar on
+python -m argotech.training.train --data data/training_set.parquet --no-radar  # control
+```
+
+Compare on the *same* file. The builder keys its window off `date.today()`, so two builds made on
+different days are not a controlled comparison.
+
+### Frozen Presto embeddings (experimental)
+
+```bash
+pip install -e '.[train]'                     # adds torch + einops, training-only
+python -m argotech.training.embed --data data/training_set_sar.parquet \
+                                  --out  data/presto_embeddings.parquet
+python -m argotech.training.train --data data/training_set_sar.parquet \
+                                  --embeddings data/presto_embeddings.parquet
+```
+
+[Presto](https://arxiv.org/abs/2304.14065) is a 402K-parameter transformer pre-trained on
+remote-sensing pixel timeseries — 12 monthly steps × 17 channels. It is **vendored**
+(`models/_presto_vendored.py`, MIT) rather than installed: the published package pins `torch==2.0`
+and imports `earthengine-api` at init, so it cannot be installed alongside this project. Weights go
+in `.cache/presto/`; fetch them once with
+
+```bash
+curl -L -o .cache/presto/default_model.pt \
+  https://raw.githubusercontent.com/nasaharvest/presto/main/data/default_model.pt
+```
+
+`--no-bands` masks the ten optical reflectance channels, which is the cheaper variant that needs no
+raw-band fetch. Results and the unit-conversion traps are in
+[`docs/model-design.md` §9.1 F](docs/model-design.md).
+
 Both upstreams are cached on disk under `.cache/`. A full build takes roughly 40 minutes cold and
 seconds warm. **Open-Meteo's archive endpoint has a daily quota** that one full build can exhaust;
 if it starts returning 429 across the board, resume tomorrow — the cache preserves progress.
 
 `train.py` prints the whole evaluation, not a headline number: leave-one-cluster-out, forward
-chaining, majority and persistence baselines, permutation importance on held-out ground, expected
-calibration error, and precision@k. Results are written to `artifacts/metrics.json`.
+chaining, **three** baselines (majority, persistence, site climatology), a linear shift-robustness
+arm beside the boosted trees, a decision-rule sweep, permutation importance on held-out ground,
+expected calibration error, and precision@k. Results are written to `artifacts/metrics.json`.
 
-A retrain that does not beat both the incumbent and the physics-only baseline on blocked CV should
-not be promoted.
+Two transforms are applied to the parquet at train time and need no dataset rebuild, because both
+derive from columns already in it:
+
+- **Cluster-relative features** — a within-cluster z-score twin for each regionally-signatured
+  feature. The label is already standardised against the peer cohort; these stop the inputs handing
+  the model raw cluster identity. Label-free, so a held-out cluster normalising against its own
+  statistics is not leakage — it is the mechanism.
+- **Site climatology** — each field's mean prior peer anomaly, as a third baseline. It asks "is this
+  field *usually* weak", where persistence asks "is it weak *right now*".
+
+A retrain that does not beat the incumbent and all three baselines on blocked CV should not be
+promoted — and "beat" has to name a metric, because macro F1 and precision@k currently disagree.
+See [`docs/model-design.md` §6](docs/model-design.md).
 
 ---
 

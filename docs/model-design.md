@@ -361,12 +361,33 @@ Non-negotiable, and the reason to distrust every accuracy number currently repor
 3. **Point-in-time-correct features** — every feature value as it was known at prediction time. A
    feature store that lets a 30-day NDVI mean computed *after* the event leak into training will
    produce a model that is excellent offline and useless online.
-4. **A baseline that must be beaten** — the L1 rule set. If the learned model cannot beat transparent
-   agronomy on blocked CV, ship the agronomy. It is cheaper, explainable, and it transfers.
-5. **Fairness slice report** — precision@k and expected-loss coverage sliced by household headship,
+4. **Baselines that must be beaten** — three of them, and naming only the easiest one is how a weak
+   model gets promoted. `training/train.py` reports all three in every fold:
+
+   | Baseline | Question it asks | Why it is here |
+   | --- | --- | --- |
+   | **Majority class** | "what if we never alert?" | The floor. Beating it is necessary, not interesting. |
+   | **Persistence** — carry `ndvi_z_peer` forward | "is this field weak *right now*?" | Vegetation is strongly autocorrelated month to month, so this is genuinely hard to beat. |
+   | **Site climatology** — the field's mean prior anomaly | "is this field *usually* weak?" | Added after the African subseasonal drought literature (arXiv 2605.05255) chose climatology over persistence *because it scored higher*. A chronically weak field is a different prediction than a currently weak one. |
+
+   Note what climatology is **not** here: a seasonal NDVI climatology is not meaningful for this
+   target, because the label is already standardised against the concurrent peer cohort, so its
+   seasonal mean is ~0 by construction and collapses onto the majority baseline. The site-level form
+   is the one that carries signal. See `add_site_climatology`.
+
+   If the learned model cannot beat transparent agronomy on blocked CV, ship the agronomy. It is
+   cheaper, explainable, and it transfers.
+5. **A shift-robustness arm** — the same features under a linear head, reported beside the boosted
+   trees. The cross-region literature finds simpler models transfer better (ridge had the smallest
+   random-CV → leave-one-country-out gap in arXiv 2605.08113). If the linear arm matches out of
+   cluster, that is a fact about the feature set's ceiling and it belongs in the record.
+6. **Fairness slice report** — precision@k and expected-loss coverage sliced by household headship,
    landholding size, and district, published with every model version.
-6. **Release gate in CI** — a model that does not beat the incumbent *and* the L1 baseline on blocked
-   CV, with calibration error under threshold and no fairness slice regression, does not promote.
+7. **Release gate in CI** — a model that does not beat the incumbent *and* all three baselines on
+   blocked CV, with calibration error under threshold and no fairness slice regression, does not
+   promote. "Beat" must name a metric: macro F1 for classification, precision@k for the triage
+   ranking, and they can disagree — the current model loses to persistence on the first and wins on
+   the second, which is a promotion decision someone has to make consciously.
 
 ---
 
@@ -510,6 +531,262 @@ now earned that role on evidence rather than on calibration alone: it ranks bett
 on the metric the product uses, it is well calibrated, and it draws on the agronomy rather than
 echoing the current anomaly. Promoting it to the primary risk score still requires beating
 persistence on temporal generalisation, which it does not yet do.
+
+> **Superseded in part.** The climatology baseline added below weakens this decision's evidence: the
+> ranking advantage was measured against persistence alone, and climatology is the stronger opponent.
+> Read §9.1 before citing the paragraph above.
+
+---
+
+## 9.1 Cross-region robustness experiments
+
+Three changes, run against the same 7,527-sample dataset with no rebuild, prompted by a review of
+recent cross-region agricultural ML. Full output: `artifacts/experimental/`.
+
+### A. A third baseline, and it changes the verdict
+
+Climatology — each field's mean prior peer anomaly — was added after the African subseasonal drought
+literature (arXiv 2605.05255) reported choosing it over persistence *because it scored higher*. It
+does here too, and by a wide margin on the metric we actually promote against:
+
+| Blocked, 6-fold mean | Model | Persistence | Climatology |
+| --- | --- | --- | --- |
+| macro F1 | 0.408 | 0.450 | **0.448** |
+| precision@25 | **0.727** | 0.460 | 0.680 |
+
+Per fold, the model's ranking win over climatology is not a win: it takes Benue (0.68 vs 0.40) and
+Ethiopia (1.00 vs 0.64), ties Kano and Kenya, and **loses Kaduna (0.80 vs 0.84) and Tanzania (0.60 vs
+0.92)**. Two wins, two ties, two losses.
+
+The honest reading: our claim was "beats persistence on ranking". Against the stronger baseline that
+claim is roughly a coin flip. Persistence was the easier opponent, and reporting only against it
+flattered the model. This does not retract the shipping decision — as one noisy-OR term among four
+hazards, a coin-flip-vs-climatology signal is still additive — but it removes the headline.
+
+### B. Cluster-relative features — modest, real, and on the right metrics
+
+Within-cluster z-score twins for the 15 regionally-signatured features, plus six features dropped for
+non-positive permutation importance. Label-free, so a held-out cluster normalising against its own
+statistics is the mechanism rather than leakage (`test_features.py` asserts both properties).
+
+| Blocked, 6-fold mean | Before | After | Δ |
+| --- | --- | --- | --- |
+| macro F1 | 0.4116 | 0.4082 | −0.003 |
+| precision@25 | 0.6933 | **0.7267** | **+0.033** |
+| ECE | 0.0927 | **0.0732** | **−0.020** |
+| macro F1 spread across clusters | 0.154 | 0.139 | −0.016 |
+
+Classification is flat; ranking and calibration both improve, and the cluster spread narrows
+slightly. Since the product ranks a triage queue and the model's role is a calibrated hazard term,
+these are the two metrics worth having. Six cluster-relative twins now appear in the top-12
+permutation importances, so the transform is carrying signal rather than adding noise.
+
+### C. The linear arm wins out-of-cluster
+
+A multinomial logistic head over identical features, added as a ceiling check on the strength of
+arXiv 2605.08113's finding that simpler models transfer better under shift. It does not merely match
+the boosted trees — **it beats them**, 0.421 vs 0.408 mean blocked macro F1, winning Benue (0.390 vs
+0.352), Kano (0.533 vs 0.473) and Ethiopia, tying Kenya, losing only Kaduna and Tanzania. On the
+temporal protocol the two are tied (0.411 vs 0.413).
+
+It does this while *handicapped*: it needs median imputation for the 223 rows with a missing
+satellite index or peer cohort, which `HistGradientBoostingClassifier` handles natively.
+
+This is a statement about the feature set, not a promotion request. Gradient boosting is buying
+nothing out-of-cluster that a linear decision surface does not already capture, which is consistent
+with finding 01: the constraint is distribution shift, not model capacity. Any future work that
+proposes a *larger* learner has to explain this row first.
+
+### D. The decision rule is F1-optimal but not recall-optimal
+
+| Alert-rate multiplier | Flagged share | macro F1 | Recall (severe) |
+| --- | --- | --- | --- |
+| 0.5× | 0.153 | 0.395 | 0.193 |
+| **1.0× (current)** | 0.306 | **0.401** | 0.291 |
+| 1.5× | 0.458 | 0.377 | 0.351 |
+| 2.0× | 0.611 | 0.346 | 0.424 |
+| 3.0× | 0.917 | 0.231 | 0.553 |
+
+The prior-matching cut in `decide` is the best available operating point *for macro F1* — worth
+knowing, since it was chosen on principle rather than measured. But it catches under a third of
+severe cases. Whether that is right is a product decision about the cost of a missed outbreak versus
+a wasted extension visit, and the table is what that decision should be made against.
+
+### E. Sentinel-1 radar, for the cloud gaps
+
+Optical coverage fails in the rainy season — exactly when a water-stress or disease signal is most
+actionable. Sentinel-1 C-band backscatter does not care about cloud, and reaches us through the same
+CDSE Statistical API as the optical indices, so it costs a new evalscript and no new dependency.
+
+Three features, computed in `radar_block`:
+
+| Feature | Formula | What it carries |
+| --- | --- | --- |
+| `rvi` | `4·VH / (VV + VH)` | Radar Vegetation Index — volume scattering, so canopy *structure* and biomass where NDVI reads greenness. ~0 bare soil, ~1 dense canopy. |
+| `vh_vv_ratio` | `VH / VV` | Cross- to co-polarised ratio; rises with canopy structure, less incidence-angle sensitive than VH alone. |
+| `rvi_z_peer` | `(rvi − μ_peers) / σ_peers` | The same cross-sectional peer standardisation the optical label uses. |
+
+Backscatter is averaged in **linear power units, not decibels** — averaging dB averages logarithms,
+which is not the mean backscatter.
+
+Two joins had to be got right. Sentinel-1 and Sentinel-2 do not share an orbit, so their P30D
+aggregation windows close on different days: `nearest_sar` pairs by closest date within a 20-day
+tolerance (deliberately under the 30-day interval, since a radar window centred further away
+describes a different point in the crop cycle). And the radar peer cohort is keyed on the *optical*
+date each observation was matched to, so `rvi_z_peer` compares fields at the same point in the
+season rather than at whatever date S1's orbit happened to close on.
+
+Radar is **additive, never a gate**: a site with no S1 coverage still yields samples, with the block
+as NaN. `HistGradientBoostingClassifier` routes NaN down its own branch; substituting a value would
+silently claim the field was observed. This also forced a fix in `add_cluster_relative`, whose
+constant-column fallback would have turned a *missing* radar value into a confident 0.0 twin —
+"exactly the cluster mean" — which is the same fabrication in a different place.
+
+**Coverage is 99.3%** of samples in the rebuilt set — radar is present almost everywhere optical is,
+and in the months where optical is not.
+
+#### Result: a small, real gain, concentrated in one cluster
+
+Ablated on the *same* parquet via `--no-radar`, so the comparison is controlled (the builder keys
+its window off `date.today()`, so two builds are not):
+
+| Blocked, 6-fold mean | Radar off | Radar on | Δ |
+| --- | --- | --- | --- |
+| macro F1 (boosted) | 0.4072 | **0.4138** | +0.0066 |
+| macro F1 (linear) | 0.4182 | 0.4152 | −0.0030 |
+| precision@25 | 0.640 | **0.667** | +0.027 |
+| ECE | **0.0484** | 0.0568 | +0.0084 (worse) |
+
+`rvi_z_peer` ranks **6th of 40** features by permutation importance on a held-out cluster (+0.0087),
+above every cluster-relative twin except `et0_90_cz` — so radar carries transferable signal rather
+than in-cluster memorisation. But the raw `rvi` scores *negative* (rank 32), which is consistent:
+absolute backscatter is dominated by land cover and terrain, and only the peer-relative form is
+comparable across fields.
+
+The honest reading is that the gain is small and unevenly distributed. Kaduna improves sharply
+(0.414 → 0.460) and three clusters move within noise, while Kenya (−0.014) and Tanzania (−0.011)
+get slightly worse. Calibration degrades marginally. Radar earns its place on the ranking metric the
+product uses and on one cluster, not as a general-purpose lift — and the cheap peer-relative feature
+is the one doing the work.
+
+### F. Frozen Presto embeddings — the two arms disagree, and that is the result
+
+Presto (arXiv 2304.14065) is a 402K-parameter transformer pre-trained on remote-sensing *pixel
+timeseries*, the same shape of data this repo collects. A frozen encoder plus a default random
+forest beat task-specific SOTA on CropHarvest's Kenya/Togo/Brazil tasks (0.836 vs 0.802 mean F1),
+which is why it earned a controlled trial.
+
+**Getting it running.** The published package cannot be installed: it pins `torch==2.0` and
+`numpy==1.23.5` and imports `earthengine-api` at package init, so even `--no-deps` fails on import.
+The authors ship `single_file_presto.py` for exactly this case; it is vendored verbatim at
+`models/_presto_vendored.py` (MIT, attributed) and needs only torch and einops. Weights live in
+`.cache/presto/`. `torch` is in the `train` extra, never in `dependencies` — the serving image has
+no use for it, and embeddings are computed offline by `argotech.training.embed`.
+
+**Three things that would have failed silently**, all now pinned by `tests/test_embeddings.py`:
+
+* Presto trained on Earth Engine's Sentinel-1, which is in **decibels**; our evalscript returns
+  **linear power**. Without `10·log10`, the model sees ~0.1 where it expects ~−15.
+* Earth Engine's ERA5 precipitation is **metres/day**; Open-Meteo gives **millimetres/day**.
+* `Encoder.mask_tokens` asserts every item in a batch has the same masked-token count. Real samples
+  violate this — a cloud gap in March is not a gap in April — so samples are bucketed by mask
+  pattern before batching.
+
+**Result** (reduced-input variant: S1 + ERA5 + SRTM + NDVI, ten optical reflectance channels
+masked, because the cache stores computed indices rather than band means). 100% coverage, merged
+onto the same parquet:
+
+| Blocked, 6-fold mean | Tabular (40 feats) | +Presto (168) | Δ |
+| --- | --- | --- | --- |
+| macro F1 — **boosted** | 0.4138 | 0.3910 | **−0.0228** |
+| macro F1 — **linear** | 0.4152 | **0.4375** | **+0.0223** |
+| precision@25 | 0.6667 | 0.6467 | −0.0200 |
+| ECE | 0.0567 | **0.0418** | −0.0148 |
+
+The arms move in opposite directions. 128 extra dims on ~5,500 training rows push the boosted trees
+into fitting noise — they lose in 5 of 6 clusters (Kano −0.058, Kaduna −0.047). The same embeddings
+help the regularised linear head in 5 of 6 (Kenya +0.064, Ethiopia +0.041).
+
+**The linear arm with Presto is the best out-of-cluster model this repo has produced: 0.4375**,
+above tabular boosted (0.4138), tabular linear (0.4152) and the pre-radar model (0.4082). It still
+loses to persistence (0.450) and climatology (0.448) on macro F1, so the standing order is unchanged
+— the naive baselines remain unbeaten on classification.
+
+This is close to what the literature predicted. Finding 01's paper measured frozen Prithvi
+embeddings at −0.027 R² against −0.068 for hand-engineered features under leave-one-country-out: a
+small edge inside per-fold noise. We measure a small edge, on the arm that regularises, and a loss
+on the arm that does not. Finding 05 anticipated that too — the embeddings only pay off *through*
+the simpler model.
+
+### G. The full 10-band variant, and a data-integrity failure worth reading
+
+Feeding the ten Sentinel-2 reflectance bands Presto was pre-trained on required a second evalscript
+(`fetch_bands_history`) and its own `.cache/sentinel_bands/` namespace, leaving the production
+optical cache untouched.
+
+**The first attempt produced an invalid result and reported it as a clean one.** The job printed
+"6716/6716 pairs (100.0% coverage)" — which counts embeddings *emitted*, not bands actually fed. In
+truth 69 of 165 sites (42%) had empty band histories: CDSE returned 429s, `_stats` collapsed them
+into `[]`, and the cache memoised that empty list as a fact about the site. The damage was
+cluster-structured — Kaduna and Kano 0/32 and 0/30 missing, Ethiopia 23/32, Kenya 16/23 — which is
+the one shape that invalidates leave-one-cluster-out outright: any measured gain would have been
+confounded with cluster identity rather than merely noisy.
+
+Three fixes, all with tests:
+
+1. **429 retry with backoff in the Sentinel client.** `meteo.py` had this since it was written;
+   `sentinel.py` never did, because serving makes one request at a time and a bulk backfill does not.
+2. **`_cached_fetch` refuses to memoise an empty result.** `_stats` cannot distinguish "no imagery
+   here" from "the request failed", so caching the empty list turns a transient rate limit into a
+   permanent hole. One extra retry next run against a silently corrupted dataset is not a close call.
+   All three cache helpers (optical, SAR, bands) share it.
+3. **`embed.py` raises on partial band coverage**, with a per-cluster breakdown, rather than emitting
+   embeddings whose gaps follow cluster boundaries.
+
+After re-fetching: 165/165 sites, zero empty, all six clusters complete.
+
+**Result, and it replicates.** Three seeds (42, 7, 2024), blocked 6-fold means:
+
+| Variant | Metric | Mean | Min | Max | Spread |
+| --- | --- | --- | --- | --- | --- |
+| tabular | macro F1 (boosted) | 0.4145 | 0.4138 | 0.4153 | 0.0015 |
+| tabular | precision@25 | 0.6400 | 0.6000 | 0.6667 | 0.0667 |
+| **+10-band** | macro F1 (boosted) | 0.3964 | 0.3927 | 0.4030 | 0.0103 |
+| **+10-band** | **precision@25** | **0.7489** | 0.6733 | 0.8133 | 0.1400 |
+
+Spectral detail does **not** close the macro-F1 gap — the boosted arm is reproducibly *worse*
+(−0.018), and the linear arm's 0.4318 sits slightly below the masked variant's 0.4375. But
+precision@25 improves in all three seeds (+0.093, +0.073, +0.160) and the ranges do not overlap: the
+worst 10-band seed (0.673) beats the best tabular seed (0.667). This is the first configuration
+whose ranking clears climatology (0.680) rather than trading folds with it.
+
+Read the split literally: the reflectance channels help the model **rank** which fields need a visit
+and do nothing for **labelling** them into three classes. Since the product ranks a triage queue by
+expected loss, that is the metric that pays — but P@25 is computed on 25 fields per fold and its
+seed spread (0.14) is twice the tabular arm's, so it deserves the wider error bar.
+
+Note the linear arm is bit-identical across seeds (0.4318 three times): lbfgs and the cluster splits
+are both deterministic, so only the boosted arm is stochastic. A seed sweep measures its variance,
+not the data's. `--seed` and `--folds-only` make the sweep a ~5-minute run.
+
+**What promotion would now require** is a product decision rather than another experiment: macro F1
+still loses to persistence (0.450) and climatology (0.448), so promoting on precision@k means
+declaring ranking the primary criterion. §6 requires that choice to be made explicitly.
+
+Both earlier caveats still stand: the gains sit inside the per-fold spread, and the reduced-input
+variant (`--no-bands`) remains available so the comparison stays controlled.
+
+### Not promoted
+
+The cluster-relative model is written to `artifacts/experimental/`, not the production path.
+`serving/pipeline.py` builds one row from `FEATURE_COLUMNS` and cannot produce the twins, so
+promoting it would raise a KeyError on the first live prediction — the P0-2 failure mode again.
+`artifact_path()` now enforces this rather than trusting anyone to remember it.
+
+To promote, serving needs cluster statistics at inference time. The open design question is where
+they come from: stored in the artifact per training cluster (fixed, exact for known regions,
+approximate for new ones) or read from `field_features` at request time (adaptive, costs a query).
+That choice belongs to whoever owns the latency budget.
 
 ---
 

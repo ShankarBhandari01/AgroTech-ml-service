@@ -6,10 +6,25 @@ from pydantic import BaseModel, Field
 
 class PredictionProbabilities(BaseModel):
     """Learned model output over the three forward-stress classes. All-zero above `low` when no
-    cloud-free scene was available and the model did not contribute."""
+    cloud-free scene was available and the model did not contribute.
+
+    **These describe the vegetation hazard term only, not overall risk.** They are the calibrated
+    posterior for "will this field's canopy be stressed relative to its peers in 30 days" — one of
+    four hazards that feed the noisy-OR, alongside drought, disease and heat. `prediction` and
+    `risk_score_percent` come from the full Hazard x Exposure x Vulnerability composition, so they
+    routinely disagree with the argmax here: a field can be 66% "low" on canopy stress and still be
+    CRITICAL because accumulated blight severity crossed the spray threshold.
+
+    The `of` field carries that caveat in the payload itself, because a consumer reading raw JSON
+    does not see this docstring.
+    """
     low: float
     medium: float
     high: float
+    of: str = Field(
+        default="vegetation hazard (peer-relative canopy stress, 30-day horizon)",
+        description="What these probabilities are over. NOT overall risk — see `risk_score_percent`.",
+    )
 
 
 class InferenceDetail(BaseModel):
@@ -88,7 +103,10 @@ class PredictionResponse(BaseModel):
     prediction: int
     priority_label: str
     risk_score_percent: float
-    probabilities: PredictionProbabilities
+    probabilities: PredictionProbabilities = Field(
+        description="Calibrated posterior for the *vegetation hazard* term only. Do not read its "
+                    "argmax as the overall risk class — that is `prediction`.",
+    )
     top_risk_factors: List[str]
     inference: InferenceDetail
     risk_assessment: RiskAssessmentDetail

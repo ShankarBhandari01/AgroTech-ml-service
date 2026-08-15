@@ -22,3 +22,7 @@ mlflow.db
 
 # Editor/hook scratch files.
 .claude/*.tmp.*
+
+# Unpromoted experiment models. Large, binary, and superseded by the next run; the metrics JSON
+# beside them is the record worth keeping. Regenerate with training/train.py --embeddings ...
+artifacts/experimental/*.joblib

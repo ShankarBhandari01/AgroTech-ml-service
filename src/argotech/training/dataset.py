@@ -41,7 +41,13 @@ import pandas as pd
 
 from argotech.data import meteo
 from argotech.data.sentinel import sentinel_client
-from argotech.features.agronomic import FEATURE_COLUMNS, WINDOW_DAYS, build, satellite_block
+from argotech.features.agronomic import (
+    FEATURE_COLUMNS,
+    WINDOW_DAYS,
+    build,
+    radar_block,
+    satellite_block,
+)
 
 # Real Sub-Saharan farming zones. Each spans >100 km so that rainfall genuinely varies within a
 # cluster — a cohort whose members all share one weather cell would make the peer label unlearnable.
@@ -58,6 +64,8 @@ LABEL_HORIZON_INTERVALS = 1     # one P30D bucket ahead
 SEVERE_Z, ELEVATED_Z = -1.0, -0.35
 
 CACHE_DIR = Path(".cache/sentinel")
+SAR_CACHE_DIR = Path(".cache/sentinel_sar")
+BANDS_CACHE_DIR = Path(".cache/sentinel_bands")
 
 
 def sample_sites(per_cluster: int, seed: int = 7) -> list[dict]:
@@ -93,13 +101,89 @@ def _radical_inverse(n: int, base: int) -> float:
 def _sentinel_history(site: dict, days: int) -> list[dict]:
     """Sentinel history with an on-disk cache. Training touches every site repeatedly across
     experiments; the CDSE free tier should be spent once."""
-    path = CACHE_DIR / f"{site['site_id']}-{days}.json"
+    return _cached_fetch(
+        CACHE_DIR / f"{site['site_id']}-{days}.json",
+        lambda: sentinel_client.fetch_history(site["latitude"], site["longitude"], days=days,
+                                              res_m=60),
+    )
+
+
+def _sar_history(site: dict, days: int) -> list[dict]:
+    """Sentinel-1 backscatter history, cached under its own key so it can be added to an existing
+    optical cache without invalidating it."""
+    return _cached_fetch(
+        SAR_CACHE_DIR / f"{site['site_id']}-{days}.json",
+        lambda: sentinel_client.fetch_sar_history(site["latitude"], site["longitude"], days=days,
+                                                  res_m=60),
+    )
+
+
+def _cached_fetch(path: Path, fetch) -> list[dict]:
+    """Read-through cache that refuses to memoise a failure.
+
+    `SentinelClient._stats` returns `[]` for both "no imagery here" and "the request failed", and
+    the caller cannot tell them apart. Caching that indistinguishable empty list is what turned a
+    burst of CDSE 429s into 69 permanently band-less sites. Not writing it costs one retry on the
+    next run; writing it costs a silently corrupted dataset, so the asymmetry is not close.
+    """
     if path.exists():
         return json.loads(path.read_text())
-    obs = sentinel_client.fetch_history(site["latitude"], site["longitude"], days=days, res_m=60)
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    obs = fetch()
+    if not obs:
+        return obs
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obs))
     return obs
+
+
+def bands_history(site: dict, days: int) -> list[dict]:
+    """Raw Sentinel-2 band means for the Presto embedding path, cached under its own key.
+
+    Deliberately not called from `collect_site`: the tabular dataset does not use raw bands, and
+    folding this in would make every dataset rebuild pay for an experiment it does not consume.
+    `training.embed` calls it directly, for the sites that actually produced samples.
+    """
+    return _cached_fetch(
+        BANDS_CACHE_DIR / f"{site['site_id']}-{days}.json",
+        lambda: sentinel_client.fetch_bands_history(site["latitude"], site["longitude"],
+                                                    days=days, res_m=60),
+    )
+
+
+def _finite(value) -> bool:
+    """True for a real, usable measurement.
+
+    Cached upstream responses predate the current filtering and can still contain JSON `NaN`, and a
+    NaN peer silently poisons a whole cohort's mean and standard deviation — every z-score computed
+    against it becomes NaN. On Python 3.12 `statistics.pstdev` additionally *raises* on such a list
+    ("'float' object has no attribute 'numerator'"), so the same defect is a crash on one interpreter
+    and silent corruption on another. Filtering at cohort-construction time fixes both.
+    """
+    return isinstance(value, (int, float)) and value == value and value not in (float("inf"), float("-inf"))
+
+
+def nearest_sar(sar: list[dict], target: str, max_gap_days: int = 20) -> dict | None:
+    """The radar observation closest in time to an optical sensing date, or None.
+
+    Sentinel-1 and Sentinel-2 do not share an orbit, so their P30D aggregation windows close on
+    different days. Pairing by nearest date within a tolerance is the join; requiring an exact match
+    would discard almost everything.
+
+    `max_gap_days` is deliberately under the 30-day aggregation interval: a radar window centred
+    more than 20 days from the optical one describes a different point in the crop cycle.
+    """
+    if not sar:
+        return None
+    t = date.fromisoformat(target)
+    best, best_gap = None, max_gap_days + 1
+    for obs in sar:
+        try:
+            gap = abs((date.fromisoformat(obs["sensing_date"]) - t).days)
+        except ValueError:
+            continue
+        if gap < best_gap:
+            best, best_gap = obs, gap
+    return best
 
 
 def collect_site(site: dict, years: int) -> dict | None:
@@ -118,6 +202,9 @@ def collect_site(site: dict, years: int) -> dict | None:
         "elevation": payload.get("elevation", 0.0),
         "daily": meteo.daily_frame(payload),
         "history": history,
+        # Radar is additive, never a gate: a site with no S1 coverage still yields samples, with the
+        # SAR block absent. Gating on it would shrink the dataset to buy a feature.
+        "sar": _sar_history(site, days),
     }
 
 
@@ -140,7 +227,18 @@ def build_samples(sites: list[dict]) -> pd.DataFrame:
     cohort: dict[tuple[str, str], list[float]] = {}
     for s in sites:
         for obs in s["history"]:
-            cohort.setdefault((s["cluster"], obs["sensing_date"]), []).append(obs["ndvi"])
+            if _finite(obs.get("ndvi")):
+                cohort.setdefault((s["cluster"], obs["sensing_date"]), []).append(obs["ndvi"])
+
+    # The radar peer cohort is keyed on the *optical* date each SAR observation was matched to, so
+    # `rvi_z_peer` compares fields at the same point in the season rather than at whatever date
+    # Sentinel-1's own orbit happened to close an interval on.
+    sar_cohort: dict[tuple[str, str], list[float]] = {}
+    for s in sites:
+        for obs in s["history"]:
+            matched = nearest_sar(s.get("sar", []), obs["sensing_date"])
+            if matched and _finite(matched.get("rvi")):
+                sar_cohort.setdefault((s["cluster"], obs["sensing_date"]), []).append(matched["rvi"])
 
     rows = []
     for s in sites:
@@ -161,9 +259,13 @@ def build_samples(sites: list[dict]) -> pd.DataFrame:
 
             window = {k2: v[end_idx - WINDOW_DAYS:end_idx] for k2, v in s["daily"].items()}
             peers_now = [v for v in cohort.get((s["cluster"], obs["sensing_date"]), []) if v != obs["ndvi"]]
-            past_ndvi = [o["ndvi"] for o in history[:k]]
+            past_ndvi = [o["ndvi"] for o in history[:k] if _finite(o.get("ndvi"))]
 
-            sat = satellite_block(obs, past_ndvi, peers_now)
+            matched_sar = nearest_sar(s.get("sar", []), obs["sensing_date"])
+            sar_peers = [v for v in sar_cohort.get((s["cluster"], obs["sensing_date"]), [])
+                         if not (matched_sar and v == matched_sar["rvi"])]
+            sat = {**satellite_block(obs, past_ndvi, peers_now),
+                   **radar_block(matched_sar, sar_peers)}
             site_ctx = {
                 "latitude": s["latitude"], "longitude": s["longitude"], "elevation": s["elevation"],
                 "clim_rain_30": _climatological_rain_30(s["daily"], end_idx, obs["sensing_date"][:4]),
