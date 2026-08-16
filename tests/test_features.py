@@ -89,15 +89,22 @@ def test_model_features_drop_the_uninformative_and_add_the_twins():
 def test_a_feature_set_serving_cannot_build_never_takes_the_production_path():
     """The guard that stops a KeyError on the first live prediction.
 
-    Serving builds one row from FEATURE_COLUMNS. A model wanting anything else must not land where
-    the registry will load it.
+    Serving builds one row from FEATURE_COLUMNS and appends the `_cz` twins from the artifact's
+    cluster snapshot. A model wanting anything beyond that must not land where the registry will
+    load it.
     """
     from argotech.features.agronomic import FEATURE_COLUMNS
 
     assert artifact_path(list(FEATURE_COLUMNS)) == PRODUCTION_ARTIFACT
     assert artifact_path(FEATURE_COLUMNS[:5]) == PRODUCTION_ARTIFACT
-    assert artifact_path(MODEL_FEATURES) != PRODUCTION_ARTIFACT
+    # The twins became buildable when pipeline.py started deriving them; this is the assertion that
+    # inverted, and it is the point of that change rather than an accident of it.
+    assert artifact_path(MODEL_FEATURES) == PRODUCTION_ARTIFACT
     assert artifact_path(list(FEATURE_COLUMNS) + ["invented"]) != PRODUCTION_ARTIFACT
+    # A twin of a column not in CLUSTER_RELATIVE is still unbuildable: serving standardises exactly
+    # the 17 listed columns, so `_cz` is not a suffix serving can honour on demand.
+    assert artifact_path(list(FEATURE_COLUMNS) + ["days_since_onset" + CZ_SUFFIX]) \
+        != PRODUCTION_ARTIFACT
 
 
 # ---------------------------------------------------------------------------------------------

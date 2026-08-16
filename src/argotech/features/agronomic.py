@@ -10,6 +10,8 @@ All computation delegates to `argotech.domain`, which is pure and separately tes
 
 from __future__ import annotations
 
+import math
+
 from argotech.domain import agronomy, indices
 
 # Length of the look-back window. 92 days is the Open-Meteo forecast endpoint's maximum look-back,
@@ -88,8 +90,13 @@ def add_cluster_relative(df, group: str = "cluster"):
 
     Standardisation uses only feature values — never the label — so a held-out cluster computing its
     own mean and standard deviation is not leakage. It is the point: the transform is what strips
-    cluster identity out of the inputs, and at serve time a new region normalises against its own
-    `field_features` rows the same way.
+    cluster identity out of the inputs.
+
+    `mu_c` and `sigma_c` are pooled over the whole frame per cluster — one pair per (cluster,
+    column), not per date. Serving must reuse *these* constants rather than recomputing from its own
+    rows: the model was fitted on twins measured against this reference distribution, and z-scores
+    against any other one are a different feature wearing the same name. `cluster_stats` snapshots
+    them into the artifact and `cluster_relative_row` replays them one row at a time.
 
     For feature x and cluster c:
 
@@ -117,6 +124,55 @@ def add_cluster_relative(df, group: str = "cluster"):
         # Restore missingness that the constant-column fallback would otherwise have filled in.
         out[col + CZ_SUFFIX] = twin.where(out[col].notna())
     return out
+
+
+def cluster_stats(df, group: str = "cluster") -> dict:
+    """`{cluster: {column: [mu, sigma]}}` — the reference distribution `add_cluster_relative` used.
+
+    Snapshotted into the model artifact so the serving path can standardise a single row against
+    the same constants. Plain lists rather than a DataFrame: this crosses a joblib boundary and
+    then a `predict` hot path, and it must not drag pandas into either.
+    """
+    grouped = df.groupby(group)
+    mean, sd = grouped[CLUSTER_RELATIVE].mean(), grouped[CLUSTER_RELATIVE].std()
+    return {str(c): {col: [float(mean.at[c, col]), float(sd.at[c, col])] for col in CLUSTER_RELATIVE}
+            for c in mean.index}
+
+
+def cluster_relative_row(row: dict, stats: dict | None) -> dict:
+    """The `_cz` twins for one row, reproducing `add_cluster_relative`'s three-way split exactly.
+
+    `stats` is one cluster's `{column: [mu, sigma]}`, or None for a field outside every known
+    cluster. An unknown cluster yields NaN rather than 0.0 for every twin: 0.0 asserts "average for
+    its region", and inventing that for a region we have never measured is the same fabrication the
+    docstring above refuses to make for a cloud-obscured field. HistGradientBoosting splits on NaN
+    natively, so the model degrades to the raw features instead of being lied to.
+    """
+    out = {}
+    for col in CLUSTER_RELATIVE:
+        x, mu_sigma = row.get(col), (stats or {}).get(col)
+        if x is None or not math.isfinite(x) or mu_sigma is None or not math.isfinite(mu_sigma[0]):
+            out[col + CZ_SUFFIX] = float("nan")
+            continue
+        mu, sigma = mu_sigma
+        # sigma > 1e-9 mirrors the vectorised `.where(sd > 1e-9, 0.0)`; a NaN sigma (a cluster with
+        # fewer than two observations of this column) is not > 1e-9 and so lands on 0.0 the same way.
+        out[col + CZ_SUFFIX] = (x - mu) / sigma if math.isfinite(sigma) and sigma > 1e-9 else 0.0
+    return out
+
+
+def assign_cluster(latitude: float, longitude: float, bounds: dict | None) -> str | None:
+    """Which training cluster a field falls in, or None if it falls in none of them.
+
+    Bounding boxes rather than a nearest-centroid match, because the clusters are not a partition of
+    the continent — they are six sampled zones. Snapping a farm 800 km away to the nearest one would
+    standardise it against a region it has nothing in common with.
+    """
+    for name, box in (bounds or {}).items():
+        (lat0, lat1), (lon0, lon1) = box["lat"], box["lon"]
+        if lat0 <= latitude <= lat1 and lon0 <= longitude <= lon1:
+            return name
+    return None
 
 
 def _slice(daily: dict, days: int) -> dict:

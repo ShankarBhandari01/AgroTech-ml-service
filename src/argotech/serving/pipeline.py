@@ -26,7 +26,13 @@ from sqlalchemy.orm import Session
 from argotech.data import meteo, store
 from argotech.data.sentinel import sentinel_client
 from argotech.domain import agronomy, indices, risk
-from argotech.features.agronomic import WINDOW_DAYS, build, satellite_block
+from argotech.features.agronomic import (
+    WINDOW_DAYS,
+    assign_cluster,
+    build,
+    cluster_relative_row,
+    satellite_block,
+)
 from argotech.models.registry import ModelManager
 from argotech.serving.schemas.request import FarmerPredictionRequest
 from argotech.serving.schemas.response import (
@@ -207,7 +213,12 @@ class PredictionsService:
         vegetation_hazard, probabilities = 0.0, None
         model_version = "none"
         if index_source == "sentinel-2":
-            model, columns, model_version = self.model_manager.agronomic_model()
+            model, columns, model_version, bounds, stats = self.model_manager.agronomic_model()
+            # Derived here rather than in `gather_upstream` so a `field_features` row stored by an
+            # older precompute run still gets its twins — they are arithmetic over the raw row and
+            # the artifact's snapshot, with no upstream call to pay for.
+            cluster = assign_cluster(lat, lon, bounds)
+            row = {**row, **cluster_relative_row(row, stats.get(cluster))}
             proba = await run_in_threadpool(model.predict_proba, pd.DataFrame([row])[columns])
             p = proba[0]
             # Expected severity on 0-1: the ranking score, and the term fed into the composition.

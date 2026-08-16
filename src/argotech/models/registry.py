@@ -20,10 +20,14 @@ class ModelManager:
         self._agronomic = None
 
     def agronomic_model(self):
-        """`(model, feature_columns, version)` for the agronomic risk model, cached in-process.
+        """`(model, feature_columns, version, cluster_bounds, cluster_stats)`, cached in-process.
 
         The version travels into every persisted prediction, so a stored row can always be traced
         back to the artifact that produced it.
+
+        The two cluster members are the reference distribution for the `_cz` twins. They default to
+        empty for an artifact trained before they were recorded: `cluster_relative_row` then yields
+        NaN twins, which a model that has no `_cz` columns never asks for anyway.
         """
         if self._agronomic is None:
             path = settings.AGRONOMIC_MODEL_PATH
@@ -33,6 +37,7 @@ class ModelManager:
                     "`python -m argotech.training.dataset` then `python -m argotech.training.train`.")
             bundle = joblib.load(path)
             version = bundle.get("version") or f"n{bundle['n_samples']}@{bundle['trained_on']}"
-            self._agronomic = (bundle["model"], bundle["feature_columns"], version)
+            self._agronomic = (bundle["model"], bundle["feature_columns"], version,
+                               bundle.get("cluster_bounds") or {}, bundle.get("cluster_stats") or {})
             print(f"Loaded agronomic model {version}")
         return self._agronomic

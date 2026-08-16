@@ -44,28 +44,36 @@ from sklearn.preprocessing import StandardScaler
 
 from argotech.features.agronomic import (
     CLUSTER_RELATIVE,
+    CZ_SUFFIX,
     FEATURE_COLUMNS,
     MODEL_FEATURES,
     RADAR_FEATURES,
     UNINFORMATIVE,
     add_cluster_relative,
+    cluster_stats,
 )
-from argotech.training.dataset import ELEVATED_Z, SEVERE_Z
+from argotech.training.dataset import CLUSTERS, ELEVATED_Z, SEVERE_Z
 
 PRODUCTION_ARTIFACT = Path("artifacts/agronomic_risk.joblib")
 EXPERIMENT_DIR = Path("artifacts/experimental")
 
 
+# What `serving/pipeline.py` can put in front of the model: the raw row from `agronomic.build`, plus
+# the cluster-relative twins it now derives from the `cluster_stats` snapshot carried in the bundle.
+SERVABLE_FEATURES = frozenset(FEATURE_COLUMNS) | {c + CZ_SUFFIX for c in CLUSTER_RELATIVE}
+
+
 def artifact_path(features: list[str]) -> Path:
     """Where this model may be written, decided by whether serving can actually feed it.
 
-    `serving/pipeline.py` builds one row from `FEATURE_COLUMNS` and slices it by the artifact's own
-    `feature_columns`. A model trained on anything outside that set — the cluster-relative twins, for
-    instance — would load fine and then raise a KeyError on the first live prediction. That is a
-    train/serve skew of exactly the kind documented as P0-2 in docs/model-design.md, so it is a guard
-    rather than a comment: a feature set serving cannot build does not get the production path.
+    `serving/pipeline.py` builds one row from `FEATURE_COLUMNS`, appends the `_cz` twins via
+    `cluster_relative_row`, and slices the result by the artifact's own `feature_columns`. A model
+    trained on anything outside that set would load fine and then raise a KeyError on the first live
+    prediction. That is a train/serve skew of exactly the kind documented as P0-2 in
+    docs/model-design.md, so it is a guard rather than a comment: a feature set serving cannot build
+    does not get the production path.
     """
-    if set(features) <= set(FEATURE_COLUMNS):
+    if set(features) <= SERVABLE_FEATURES:
         return PRODUCTION_ARTIFACT
     EXPERIMENT_DIR.mkdir(parents=True, exist_ok=True)
     return EXPERIMENT_DIR / "agronomic_risk_clusterrel.joblib"
@@ -528,9 +536,9 @@ def main() -> None:
     artifact = artifact_path(MODEL_FEATURES)
     artifact.parent.mkdir(parents=True, exist_ok=True)
     if artifact != PRODUCTION_ARTIFACT:
-        print(f"\n!! {len(set(MODEL_FEATURES) - set(FEATURE_COLUMNS))} features are not buildable by "
+        print(f"\n!! {len(set(MODEL_FEATURES) - SERVABLE_FEATURES)} features are not buildable by "
               f"serving/pipeline.py; writing to {artifact} instead of the production path.")
-        print("   To promote: teach the serving path to build the cluster-relative twins.")
+        print(f"   Not buildable: {sorted(set(MODEL_FEATURES) - SERVABLE_FEATURES)}")
     # Metrics live beside their artifact, or an experimental run silently overwrites the record of
     # what production is actually doing.
     metrics_path = artifact.with_name("metrics.json" if artifact == PRODUCTION_ARTIFACT
@@ -540,9 +548,14 @@ def main() -> None:
         "model": final,
         "version": version,
         "feature_columns": MODEL_FEATURES,
-        # The serving path must reproduce these before calling the model: the cluster-relative
-        # twins are computed against the field's own cluster statistics, not stored per row.
+        # The serving path reproduces the twins before calling the model. It needs both halves:
+        # which cluster a field falls in (`cluster_bounds`) and the (mu, sigma) that cluster's
+        # columns were standardised against here (`cluster_stats`). Recomputing sigma from serving
+        # traffic instead would feed the model a differently-scaled feature under the same name.
         "cluster_relative": CLUSTER_RELATIVE,
+        "cluster_stats": cluster_stats(df),
+        "cluster_bounds": {c["name"]: {"lat": list(c["lat"]), "lon": list(c["lon"])}
+                           for c in CLUSTERS},
         "classes": [0, 1, 2],
         "label": "peer-standardised NDVI anomaly 30 days ahead",
         "thresholds": {"severe_z": SEVERE_Z, "elevated_z": ELEVATED_Z},
