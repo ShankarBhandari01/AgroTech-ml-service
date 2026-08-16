@@ -12,10 +12,10 @@ __pycache__/
 .DS_Store
 .env
 
-# Training-time artifacts. The inference service only loads the two *_model.pkl files, which the
-# Dockerfile copies explicitly.
+# Training-time state. The image only needs artifacts/agronomic_risk.joblib, which the Dockerfile
+# copies explicitly — do not exclude artifacts/.
+.cache/
+data/
 mlruns/
 mlflow.db
 *.csv
-farmerxential_features.pkl
-farmerxential_shap_explainer.pkl

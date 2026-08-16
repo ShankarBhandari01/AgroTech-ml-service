@@ -1,46 +1,83 @@
 # AgroTech ML Service (`argotech-ai`)
 
-FastAPI inference service for the FarmerXential Early Warning System. It turns a farmer record — or
-a bare pair of GPS coordinates — into a 3-class agronomic risk prediction (`0` normal, `1` elevated,
-`2` critical), enriched with Sentinel-2 spectral indices, Open-Meteo microclimate lag features, and a
-cross-attention fusion score.
+FastAPI inference service for the FarmerXential early warning system. It turns a farmer record — or
+a bare pair of GPS coordinates — into a decomposed agronomic risk assessment: hazard from physics
+and epidemiology, exposure in currency, vulnerability from coping capacity, plus a Crop Health Index
+from Sentinel-2.
 
 Repository: `ShankarBhandari01/AgroTech-ml-service`. Deployed as the `ml` service in the Kotlin
 backend's `docker-compose.prod.yml` on a single GCE VM.
+
+> **Design rationale lives in [`docs/model-design.md`](docs/model-design.md).** It covers why the
+> model is decomposed the way it is, the measured retraining results, and the roadmap. Read it
+> before changing the model or the feature set.
 
 ---
 
 ## Contents
 
 - [What this service is](#what-this-service-is)
+- [How a prediction is produced](#how-a-prediction-is-produced)
 - [Architecture](#architecture)
 - [API reference](#api-reference)
+- [The nightly job](#the-nightly-job)
 - [Configuration](#configuration)
 - [Local development](#local-development)
 - [Docker build and deploy](#docker-build-and-deploy)
-- [Models](#models)
+- [The model](#the-model)
 - [Training](#training)
 - [Troubleshooting](#troubleshooting)
 - [Known issues](#known-issues)
+- [Repository layout](#repository-layout)
 
 ---
 
 ## What this service is
 
-This is not a public-facing API. It has no authentication, no rate limiting, and no published ports
-in production. Its only caller is the Kotlin backend (`agri-saas-kotlin-backend`), which reaches it
-over the internal compose network at `http://ml:8000` via `FASTAPI_ML_URL`.
+Not a public-facing API. No authentication, no rate limiting, no published ports in production. Its
+only caller is the Kotlin backend (`agri-saas-kotlin-backend`), which reaches it over the internal
+compose network at `http://ml:8000` via `FASTAPI_ML_URL`.
 
 | Concern | Owner |
 | --- | --- |
-| Auth, tenancy, rate limiting, persistence of predictions | Kotlin backend |
-| Circuit breaking / retry / bulkhead / timeout around ML calls | Kotlin backend (`FastApiMlClientImpl`, Resilience4j) |
-| Feature assembly, model loading, inference, risk narrative | This service |
-| Map-tile / raster visualisation | Kotlin backend (this service only uses the CDSE **Statistical** API) |
+| Auth, tenancy, rate limiting | Kotlin backend |
+| Circuit breaking / retry / bulkhead around ML calls | Kotlin backend (`FastApiMlClientImpl`, Resilience4j) |
+| Feature assembly, agronomy, model inference, risk composition | This service |
+| Prediction audit trail and outcome capture | This service (`predictions`, `field_outcomes`) |
+| Map-tile / raster visualisation | Kotlin backend (this service uses only the CDSE **Statistical** API) |
 
-The backend calls it from `FastApiMlClientImpl.kt` and from `PredictionQueueConsumer`, and degrades
-to a static `FALLBACK` payload when this service is unreachable — which is why `ml` is deliberately
-**not** in the `app` service's `depends_on`.
+The backend calls it from `FastApiMlClientImpl.kt` and `PredictionQueueConsumer`, and degrades to a
+static `FALLBACK` payload when unreachable — which is why `ml` is deliberately **not** in the `app`
+service's `depends_on`.
+
+---
+
+## How a prediction is produced
+
+Risk is not a single model output. It is composed, and each term is separately computable and
+separately checkable:
+
+```
+Risk = Hazard × Exposure × Vulnerability
+```
+
+| Term | Source | Needs training data? |
+| --- | --- | --- |
+| **Hazard** — drought, disease, heat | FAO-56 water balance, Wallin/BLITECAST severity values, flowering heat-stress days | No. Physics and epidemiology. |
+| **Hazard** — vegetation | The trained model, entering as one more independent hazard via noisy-OR | Yes |
+| **Exposure** | `area × expected yield × farm-gate price`, in USD | No |
+| **Vulnerability** | Weighted coping capacity: irrigation, extension access, credit, inputs, diversification, assets, market access | No |
+
+Two numbers come out, answering different questions:
+
+- `risk_score_percent` (0–100) — expected **loss rate**, comparable across farms of any size. The
+  number a farmer sees.
+- `expected_loss_usd` — what a triage queue ranks by, and what makes the return on an extension
+  visit measurable.
+
+`head_gender` and `household_max_education` are **rejected** by `risk.assess_vulnerability`, not
+merely unused — a system that allocates extension visits and credit must not route them by a
+protected attribute. They stay available for measuring disparate impact.
 
 ---
 
@@ -54,25 +91,24 @@ flowchart LR
     subgraph vm["GCE VM — docker compose network"]
         app -->|"POST http://ml:8000/predict/*"| ml["FastAPI inference service<br/>agri-ml"]
         app --> pg[("Postgres")]
-        ml -->|"farmer_profiles<br/>farmers_ml_profiles<br/>farmers_crops"| pg
+        ml -->|"reads farmer_profiles,<br/>writes field_features,<br/>predictions, field_outcomes"| pg
+        cron["nightly precompute job"] --> pg
     end
 
-    ml -->|"joblib.load, cached in-process"| pkl["farmerxential_model.pkl<br/>farmerxential_powerful_model.pkl"]
-    ml -->|"CDSE Statistical API<br/>NDVI / NDWI / EVI"| sentinel["Copernicus Data Space<br/>Sentinel-2 L2A"]
-    ml -->|"7-day hourly forecast + past_days"| meteo["Open-Meteo"]
+    cron -->|"ERA5 daily + Sentinel-2 + hourly RH"| upstream["Open-Meteo<br/>Copernicus CDSE"]
+    ml -.->|"only when no fresh<br/>precomputed row exists"| upstream
+    ml -->|"joblib, cached in-process"| art["artifacts/agronomic_risk.joblib"]
     ml -.->|"only if OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is set"| otlp["OTLP collector"]
 ```
 
-Notes on the diagram:
+The important line is the dotted one from `ml` to the upstreams. **Predictions normally make no
+external calls**: the nightly job precomputes the expensive part into `field_features` and a request
+is a database read plus a model call. Live computation remains as the fallback for a field with no
+fresh row — a farm registered this morning still gets a prediction today, it just pays the latency
+once.
 
-- The `ml` container has **no published ports**. Nothing outside the compose network can reach it.
-- Model loading is local-file `joblib.load` by default (`USE_LOCAL_MODEL=true`). The MLflow registry
-  path exists in `ModelManager` but is not used in production.
-- Sentinel is optional. With no credentials, `SentinelClient.enabled` is `False` and the pipeline
-  falls back to deterministic synthetic indices tagged `source: "modelled"`.
-- OpenTelemetry tracing is always instrumented; **span export** is opt-in via
-  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. No collector runs in the deployed stack, so nothing is
-  exported there.
+Both paths call the same `pipeline.gather_upstream`, so a precomputed prediction and a live one are
+the same computation.
 
 ### Prediction request flow
 
@@ -83,45 +119,25 @@ sequenceDiagram
     participant API as FastAPI router
     participant PS as PredictionsService
     participant PG as Postgres
-    participant OM as Open-Meteo
-    participant S2 as CDSE Sentinel-2
-    participant MM as ModelManager
 
-    BE->>API: POST /predict/farmer {farmer_id, model_name, model_alias}
+    BE->>API: POST /predict/farmer {farmer_id}
     API->>PS: predict()
-    PS->>PG: SELECT farmer_profiles JOIN farmers_ml_profiles
+    PS->>PG: farmer_profiles ⋈ farmers_ml_profiles
     alt no row
         PG-->>PS: empty
         PS-->>BE: 404 Farmer not found
     else row found
-        PG-->>PS: profile + ML profile + crop_diversity_score
-        PS->>OM: 7-day hourly temp / RH / soil moisture / rain
-        OM-->>PS: hourly arrays (168x4 sequence)
-        PS->>S2: Statistical API, 30-day window, maxCloudCoverage 40
-        S2-->>PS: mean NDVI / NDWI / EVI (or none, then synthetic)
-        PS->>PS: CrossAttentionFusionLayer.forward(spatial 4-vec, temporal seq)
-        PS->>MM: predict + predict_proba on 27-column frame
-        MM->>MM: get_model (cached) then _align_features to feature_names_in_
-        MM-->>PS: class label + class probabilities
+        PS->>PG: SELECT field_features (latest, < 48h old)
+        alt fresh row
+            PG-->>PS: features + context
+        else missing or stale
+            PS->>PS: gather_upstream() — ERA5, Sentinel-2, hourly RH, climatology
+        end
+        PS->>PS: model → vegetation hazard; domain.risk → H × E × V
+        PS->>PG: INSERT predictions (features, version, score) → prediction_id
         PS-->>BE: PredictionResponse
     end
 ```
-
-`/predict/coldstart` follows the same path but skips the Postgres step: it builds a
-`SimpleNamespace` stand-in from the request body and calls `predict_from_farmer_data` directly.
-
-### Where the numbers come from
-
-| Output field | Source |
-| --- | --- |
-| `prediction`, `probabilities`, `risk_score_percent` | `HybridSpatiotemporalEnsemble` in the `.pkl` (XGBoost + HistGB + RF + ExtraTrees stacked under a `LogisticRegression`, sigmoid-calibrated) |
-| `spatiotemporal_indices` | CDSE Sentinel-2 Statistical API, else deterministic `sin/cos` synthetic model |
-| `microclimate_metrics` | Open-Meteo hourly, aggregated in `_fetch_microclimate_weather_data` |
-| `cross_attention_fusion` | NumPy `CrossAttentionFusionLayer` (untrained fixed random projections, seed 42) |
-| `top_risk_factors`, `inference`, `recommended_action` | Rule thresholds in `_generate_risk_drivers` and `predict_from_farmer_data`, **not** the model |
-
-`risk_level` / `disease_type` / `recommended_action` are deterministic if/else branches over
-`prediction` and `risk_score`. They are a narrative layer, not a second model.
 
 ---
 
@@ -129,206 +145,203 @@ sequenceDiagram
 
 Base URL in production: `http://ml:8000` (compose-internal). No auth on any route.
 
-| Method | Path | Request body | Response | Notes |
-| --- | --- | --- | --- | --- |
-| `GET` | `/health` | — | `{"status": "ok"}` | Consumed by the compose healthcheck and the backend's `getHealth()` |
-| `POST` | `/predict` | `PredictionRequest` | — | **Always returns 400.** Placeholder that tells you to use `/predict/farmer` or `/predict/coldstart` |
-| `POST` | `/predict/farmer` | `FarmerPredictionRequest` | `PredictionResponse` | Loads the farmer from Postgres. 404 if not found, 400 if the pipeline throws, 500 on unexpected errors |
-| `POST` | `/predict/coldstart` | `CoordinatesColdStartPredictionRequest` | `PredictionResponse` | No DB lookup. `field_id` is synthesised as `coldstart-<lat:.4f>-<lon:.4f>` |
-| `GET` | `/predict/crop-health` | — | `{average_ndvi, pest_risk_level, disease_probability, yield_forecast_mt_ha}` | **Mock.** Returns `random` values on every call; no model, no DB, no satellite |
-| `GET` | `/docs`, `/openapi.json` | — | — | FastAPI defaults, not disabled |
+| Method | Path | Body | Notes |
+| --- | --- | --- | --- |
+| `GET` | `/health` | — | `{"status":"ok"}`. Consumed by the compose healthcheck. **Does not verify the model loads** — see Known issues |
+| `POST` | `/predict/farmer` | `FarmerPredictionRequest` | Loads the farmer from Postgres. 404 if absent, 422 without coordinates, 503 if upstreams are down on a live-path prediction |
+| `POST` | `/predict/coldstart` | `CoordinatesColdStartPredictionRequest` | No farmer lookup. `field_id` is `coldstart-<lat:.4f>-<lon:.4f>` |
+| `GET` | `/predict/crop-health` | `?latitude=&longitude=` | Crop Health Index from Sentinel-2 against the field's own 12-month history. Deterministic, no model |
+| `POST` | `/outcomes` | `OutcomeRequest` | Record what an agent found / was diagnosed / was harvested. **The label stream** |
+| `GET` | `/outcomes/label-count` | `?horizon_days=30` | How many prediction↔outcome pairs exist |
+| `GET` | `/docs`, `/openapi.json` | — | FastAPI defaults, not disabled |
 
-### Request schemas
+`model_name` / `model_alias` remain on the request schemas for backward compatibility with the
+Kotlin client and are ignored — there is one model now.
 
-`FarmerPredictionRequest` — `POST /predict/farmer`
+### Response — `PredictionResponse`
 
-| Field | Type | Default |
-| --- | --- | --- |
-| `farmer_id` | `str` | required |
-| `model_name` | `str?` | `"farmerXential_powerful_model"` |
-| `model_alias` | `str?` | `"prod"` |
-
-`CoordinatesColdStartPredictionRequest` — `POST /predict/coldstart`
-
-| Field | Type | Default |
-| --- | --- | --- |
-| `latitude` | `float` | required |
-| `longitude` | `float` | required |
-| `state` | `str?` | `"Kaduna"` |
-| `crop_type` | `str?` | `"Maize"` |
-| `farm_size` | `float?` | `1.5` |
-| `model_name` | `str?` | `"farmerXential_powerful_model"` |
-| `model_alias` | `str?` | `"prod"` |
-
-`PredictionRequest` — the flat 24-field survey payload (`yield_value`, `has_extension_access`,
-`household_max_education`, `shock_level`, `received_assistance`, `used_fertilizer`, `land_size`,
-`household_size`, `zone`, `transport_cost`, `dependency_ratio`, `asset_score`,
-`postharvest_activity_score`, `crop_loss_risk_score`, `crop_diversity_score`,
-`digital_access_score`, `has_veterinary_access`, `market_access_score`, `is_rural`,
-`rainfall_anomaly`, `drought_risk`, `cultivates_crops`, `received_credit`, `head_gender`). It is
-declared and validated but never used for inference — `/predict` rejects everything.
-
-### Response schema
-
-`PredictionResponse`:
-
-| Field | Type | Notes |
-| --- | --- | --- |
-| `field_id` | `str` | The `farmer_id` from the request, or the synthesised coldstart id |
-| `crop_type` | `str` | First crop on the farmer record, `"Maize"` when absent |
-| `phenology_stage` | `str` | Hardcoded `"Vegetative / Flowering"` |
-| `prediction` | `int` | `0` / `1` / `2` |
-| `priority_label` | `str` | `Low` / `Medium` / `High Priority` |
-| `risk_score_percent` | `float` | `P(class 2) * 100`, one decimal |
-| `probabilities` | `{low, medium, high}` | Calibrated class probabilities |
-| `top_risk_factors` | `string[]` | All triggered rule drivers |
-| `inference` | `{risk_level, disease_type, probability, primary_drivers}` | `primary_drivers` is the first 4 of `top_risk_factors` |
-| `spatiotemporal_indices` | `{ndvi, ndwi, evi, canopy_stress_status, source}` | `source` is `"sentinel-2"` or `"modelled"` |
-| `microclimate_metrics` | `{rh_85_consecutive_hrs, incubation_hours, soil_water_deficit_72h, rainfall_anomaly}` | |
-| `cross_attention_fusion` | `{fusion_score, peak_incubation_hour, fusion_status}` | |
-| `recommended_action` | `str` | Rule-derived |
-| `created_at` | `datetime` | `datetime.utcnow()` at response construction |
+| Field | Notes |
+| --- | --- |
+| `field_id` | Farmer id, or the synthesised coldstart id |
+| `prediction_id` | Row id in `predictions`. **Pass this back on `POST /outcomes`** — it is the join that produces training labels |
+| `model_version` | Artifact version behind this prediction, or `"none"` when no satellite scene was available |
+| `feature_source` | `"precomputed"` or `"live"` |
+| `features_computed_at` | When the precomputed row was built; null on the live path |
+| `crop_type`, `phenology_stage` | Stage is derived from GDD accumulated since the rainy-season onset |
+| `prediction`, `priority_label` | `0`/`1`/`2`, Low/Medium/High Priority |
+| `risk_score_percent` | Expected loss rate, 0–100 |
+| `probabilities` | Calibrated model probabilities. All in `low` when the model did not contribute |
+| `top_risk_factors` | Drivers, most specific first |
+| `inference` | `{risk_level, dominant_hazard, probability, primary_drivers, model_contributed}` |
+| `risk_assessment` | `{risk_score, expected_loss_usd, value_at_risk_usd, hazard{...}, vulnerability{...}}` |
+| `crop_health` | `{score, vigour, moisture, anomaly, status}`. Null with no cloud-free scene |
+| `spatiotemporal_indices` | `{ndvi, ndwi, evi, vci, canopy_stress_status, source, sensing_date}`. `ndwi` is the B08/B11 formula, i.e. NDMI — kept under this name for API compatibility |
+| `microclimate_metrics` | Water satisfaction and deficit, dry spell, real rainfall anomaly, heat days, cumulative DSV, spray threshold, GDD since onset |
+| `recommended_action` | Derived from the dominant hazard and the phenology stage |
 
 Example — `POST /predict/coldstart`:
 
 ```json
-{
-  "latitude": 10.52,
-  "longitude": 7.44,
-  "state": "Kaduna",
-  "crop_type": "Maize",
-  "farm_size": 2.0
-}
+{ "latitude": 10.85, "longitude": 7.66, "crop_type": "Maize", "farm_size": 2.0 }
 ```
 
 ```json
 {
-  "field_id": "coldstart-10.5200-7.4400",
+  "field_id": "coldstart-10.8500-7.6600",
+  "prediction_id": 10482,
+  "model_version": "agro-20260811T101300Z",
+  "feature_source": "precomputed",
   "crop_type": "Maize",
-  "phenology_stage": "Vegetative / Flowering",
-  "prediction": 2,
-  "priority_label": "High Priority",
-  "risk_score_percent": 87.5,
-  "probabilities": { "low": 0.05, "medium": 0.075, "high": 0.875 },
-  "top_risk_factors": [
-    "Relative humidity > 85% for 18 consecutive hours",
-    "Fungal incubation window active for 22 hours (18–24°C)",
-    "Leaf water stress detected (NDWI: 0.08)",
-    "Low crop yield (< 1.5 tons/ha)"
-  ],
+  "phenology_stage": "Grain Fill",
+  "prediction": 1,
+  "priority_label": "Medium Priority",
+  "risk_score_percent": 48.9,
+  "probabilities": { "low": 0.672, "medium": 0.192, "high": 0.137 },
   "inference": {
-    "risk_level": "CRITICAL",
-    "disease_type": "Late Blight / Fungal Leaf Rust in Maize",
-    "probability": 0.875,
-    "primary_drivers": [
-      "Relative humidity > 85% for 18 consecutive hours",
-      "Fungal incubation window active for 22 hours (18–24°C)",
-      "Leaf water stress detected (NDWI: 0.08)",
-      "Low crop yield (< 1.5 tons/ha)"
-    ]
+    "risk_level": "ELEVATED",
+    "dominant_hazard": "disease",
+    "probability": 0.574,
+    "model_contributed": true
   },
-  "spatiotemporal_indices": {
-    "ndvi": 0.42,
-    "ndwi": 0.08,
-    "evi": 0.38,
-    "canopy_stress_status": "High Water Stress",
-    "source": "sentinel-2"
+  "risk_assessment": {
+    "risk_score": 48.9,
+    "expected_loss_usd": 217.55,
+    "value_at_risk_usd": 737.5,
+    "hazard": { "drought": 0.0, "disease": 0.444, "heat": 0.0, "vegetation": 0.233,
+                "combined": 0.574, "dominant": "disease" },
+    "vulnerability": { "score": 0.713, "coping_capacity": 0.287,
+                       "gaps": ["has_irrigation", "has_extension_access", "received_credit"] }
   },
-  "microclimate_metrics": {
-    "rh_85_consecutive_hrs": 18,
-    "incubation_hours": 22,
-    "soil_water_deficit_72h": 0.062,
-    "rainfall_anomaly": 2.4
-  },
-  "cross_attention_fusion": {
-    "fusion_score": 0.1873,
-    "peak_incubation_hour": 91,
-    "fusion_status": "Active Spatiotemporal Cross-Attention Align"
-  },
-  "recommended_action": "Apply protective copper-based fungicide spray within 24–48 hours and dispatch extension agent for immediate field inspection.",
-  "created_at": "2026-08-07T09:41:02.113244"
+  "crop_health": { "score": 36.2, "vigour": 0.335, "moisture": 0.206,
+                   "anomaly": 0.556, "status": "Stressed" },
+  "spatiotemporal_indices": { "ndvi": 0.31, "ndwi": -0.077, "evi": 0.219, "vci": 33.5,
+                              "canopy_stress_status": "Stressed",
+                              "source": "sentinel-2", "sensing_date": "2026-08-06" },
+  "microclimate_metrics": { "water_satisfaction_30d": 1.0, "water_deficit_30d_mm": 0.0,
+                            "longest_dry_spell_days": 1, "rainfall_anomaly_30d_mm": 67.4,
+                            "heat_stress_days": 0, "cumulative_dsv": 8,
+                            "spray_threshold_reached": false, "gdd_since_onset": 1088.8 },
+  "recommended_action": "Blight severity is accumulating on Maize at Grain Fill. Scout the lower canopy for lesions now and have fungicide staged before the threshold is reached."
 }
 ```
+
+### Recording an outcome
+
+```bash
+curl -X POST localhost:8000/outcomes -H 'content-type: application/json' -d '{
+  "field_id": "farmer-123",
+  "prediction_id": 10482,
+  "observed_at": "2026-08-20T09:00:00Z",
+  "outcome_type": "agent_visit",
+  "stress_confirmed": true,
+  "diagnosis": "Northern corn leaf blight, lower canopy",
+  "reported_by": "agent-44"
+}'
+```
+
+Every advisory should be reconcilable against what an agent actually found. Nothing in the
+supervised-model roadmap is possible until these accumulate.
+
+---
+
+## The nightly job
+
+```bash
+python -m argotech.jobs.precompute            # all fields
+python -m argotech.jobs.precompute --limit 1  # smoke test; also creates the schema
+```
+
+```
+0 2 * * *  python -m argotech.jobs.precompute
+```
+
+Single instance — it owns the DDL (`store.ensure_schema`) and API startup deliberately does not, so
+N replicas cannot race. Sequential with a 1.5 s pause between fields: both upstreams are free and
+rate-limited, and the job has all night. Parallelism here is what triggered 429s during training.
+
+It prints a summary worth alerting on:
+
+```
+Done: {'fields': 412, 'ok': 405, 'degraded': 63, 'failed': 7, 'pruned': 380, 'degraded_rate': 0.156}
+```
+
+`degraded_rate` is the share of fields with no cloud-free Sentinel-2 scene — no canopy signal, no
+model contribution, physics-only assessment. It is a genuine quality regression that no latency or
+error dashboard will show you.
+
+Feature rows are pruned after 90 days. They are kept that long because a prediction under
+investigation must be reproducible from the row that produced it.
 
 ---
 
 ## Configuration
 
-All settings live in `src/services/inferenceService/app/core/config.py` (`pydantic-settings`,
-`env_file=".env"`, `extra="ignore"`). In Docker there is no `.env` file — it is excluded by
-`.dockerignore` — so every value comes from the container environment or the default.
+All settings live in `src/argotech/config.py` (`pydantic-settings`, `env_file=".env"`,
+`extra="ignore"`). In Docker there is no `.env` file — `.dockerignore` excludes it — so every value
+comes from the container environment or the default.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `MLFLOW_TRACKING_URI` | `http://127.0.0.1:5000` | Registry URI. Only consulted when `USE_LOCAL_MODEL` is false or the model name is not one of the two local ones |
-| `MODEL_NAME` | `farmerXential_model` | Default registry model name. Note the per-request bodies default to `farmerXential_powerful_model` instead |
-| `MODEL_ALIAS` | `prod` | Default registry alias |
-| `USE_LOCAL_MODEL` | `true` | Load `.pkl` from disk rather than MLflow. `true` in production |
-| `DATABASE_URL` | `postgresql://postgres:password@localhost:5432/agrotech` | Read-only queries against the backend's Postgres. A `postgres://` prefix is rewritten to `postgresql://` |
-| `SENTINEL_CLIENT_ID` | `""` | CDSE OAuth client id. Blank disables real Sentinel fetch |
-| `SENTINEL_CLIENT_SECRET` | `""` | CDSE OAuth client secret. Blank disables real Sentinel fetch |
+| `DATABASE_URL` | `postgresql://postgres:password@localhost:5432/agrotech` | Reads the backend's farmer tables; owns `field_features`, `predictions`, `field_outcomes`. A `postgres://` prefix is rewritten |
+| `AGRONOMIC_MODEL_PATH` | `artifacts/agronomic_risk.joblib` | Model artifact, loaded by relative path from the working directory |
+| `SENTINEL_CLIENT_ID` | `""` | CDSE OAuth client id. Blank disables the satellite path entirely |
+| `SENTINEL_CLIENT_SECRET` | `""` | CDSE OAuth client secret |
 | `SENTINEL_TOKEN_URL` | CDSE Keycloak token endpoint | Override for commercial Sentinel Hub |
 | `SENTINEL_STATS_URL` | `https://sh.dataspace.copernicus.eu/api/v1/statistics` | Statistical API endpoint |
 
-Read directly from the environment, not through `Settings`:
+Read from the environment directly, not through `Settings`:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | When set, adds a `BatchSpanProcessor` with an OTLP/HTTP exporter. Left unset deliberately in production so the exporter does not retry against a dead endpoint forever |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | When set, adds a `BatchSpanProcessor` with an OTLP/HTTP exporter. Left unset in production so the exporter does not retry against a dead endpoint forever |
 
-What the production compose actually sets on the `ml` service: `DATABASE_URL`, `USE_LOCAL_MODEL=true`,
-`SENTINEL_CLIENT_ID`, `SENTINEL_CLIENT_SECRET`. Everything else runs on defaults.
+`USE_LOCAL_MODEL`, `MLFLOW_TRACKING_URI`, `MODEL_NAME` and `MODEL_ALIAS` are gone with the MLflow
+path. `extra="ignore"` means a compose file still setting them is harmless.
+
+Without Sentinel credentials the service still works: `crop_health` is null, `probabilities` collapse
+to `low: 1.0`, and the drought/disease/heat hazards carry the assessment on their own.
 
 ---
 
 ## Local development
 
 ```bash
-cd /path/to/argotech-ai
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -e '.[train,dev]'
 
-# torch: install the CPU wheel first if you do not want the CUDA stack
-pip install --index-url https://download.pytorch.org/whl/cpu torch
-
-uvicorn src.services.inferenceService.app.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn argotech.serving.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-Run it from the **repository root**. `ModelManager` opens `farmerxential_model.pkl` by bare relative
-path, so the process working directory must be the directory holding the `.pkl` files.
+Run from the **repository root** — the model artifact is loaded by relative path.
+
+```bash
+python tests/test_domain.py     # agronomy, indices, risk composition
+python tests/test_store.py      # freshness rule, JSONB round-trip fidelity
+```
 
 Smoke test:
 
 ```bash
 curl -s localhost:8000/health
-# {"status":"ok"}
 
-curl -s -X POST localhost:8000/predict/coldstart \
-  -H 'content-type: application/json' \
-  -d '{"latitude":10.52,"longitude":7.44}' | python -m json.tool
+curl -s "localhost:8000/predict/crop-health?latitude=10.85&longitude=7.66" | python -m json.tool
+
+curl -s -X POST localhost:8000/predict/coldstart -H 'content-type: application/json' \
+  -d '{"latitude":10.85,"longitude":7.66}' | python -m json.tool
 ```
 
-`/predict/coldstart` needs no database. `/predict/farmer` needs a reachable Postgres with
-`farmer_profiles`, `farmers_ml_profiles`, and `farmers_crops` — set `DATABASE_URL` in a local `.env`
-(gitignored) and point it at the backend's database.
-
-`Procfile` (`web: uvicorn ... --port $PORT`) is a leftover from PaaS hosting. The Docker image hard-codes
-port 8000 instead.
+`/predict/coldstart` needs no farmer row, but does need `DATABASE_URL` to reach a Postgres for the
+feature and audit tables. It degrades rather than failing if they are absent.
 
 ---
 
 ## Docker build and deploy
 
-The image is built with Cloud Build and pushed to Artifact Registry:
-
 ```bash
 gcloud builds submit \
-  --tag europe-west2-docker.pkg.dev/farmerxential-backend/agri/ml:<tag> \
+  --tag europe-west2-docker.pkg.dev/farmerxential-backend/agri/ml:$(git rev-parse --short HEAD) \
   --region=europe-west2 .
 ```
-
-Then on the VM, set the tag and roll the service:
 
 ```bash
 # /opt/agri/.env
@@ -340,25 +353,20 @@ sudo docker compose -f docker-compose.prod.yml pull ml
 sudo docker compose -f docker-compose.prod.yml up -d ml
 ```
 
-Currently deployed tag: `ml:2026-08-07c`.
-
 ### Image layout
 
 | Layer | Why |
 | --- | --- |
 | `python:3.11-slim` | Base |
-| `apt-get install libgomp1` | XGBoost links against libgomp at runtime; nothing else needs a system package |
-| `pip install --index-url https://download.pytorch.org/whl/cpu torch` | Installed **before** `requirements.txt` so the bare `torch` line there resolves to the already-satisfied CPU build instead of pulling ~2.5 GB of `nvidia-*` CUDA wheels onto a GPU-less VM |
-| `COPY requirements.txt` then `pip install -r` | Dependency layer only rebuilds when requirements change |
-| `COPY farmerxential_model.pkl farmerxential_powerful_model.pkl ./` | Into `/app`, the `WORKDIR`, because `ModelManager` loads them by bare relative path |
-| `COPY src src` | Application code |
+| `apt-get install libgomp1` | scikit-learn's `HistGradientBoosting` links against libgomp at runtime; nothing else needs a system package |
+| `COPY pyproject.toml` then `pip install .` | Dependency layer rebuilds only when the pins change |
+| `COPY artifacts/agronomic_risk.joblib` | Loaded by relative path from `WORKDIR` |
+| `COPY src src` then `pip install --no-deps .` | Application code |
 | `useradd --system ml` + `USER ml` | Non-root runtime |
-| `CMD uvicorn ... --port 8000` | Fixed port; compose talks to it on a known internal port |
+| `CMD uvicorn argotech.serving.main:app --port 8000` | Fixed port; compose talks to it internally |
 
-`.dockerignore` and `.gcloudignore` exclude `.venv/` (≈1 GB), `mlruns/`, `mlflow.db`, `*.csv`,
-`farmerxential_features.pkl`, and `farmerxential_shap_explainer.pkl`. `.gcloudignore` is written
-explicitly because gcloud otherwise derives one from `.gitignore`, which lists `venv/` but not
-`.venv/` — a 1 GB upload on every build.
+`.gcloudignore` is written explicitly because gcloud otherwise derives one from `.gitignore`, which
+lists `venv/` but not `.venv/` — a 1 GB upload on every build.
 
 ### Compose service
 
@@ -369,7 +377,6 @@ ml:
   restart: always
   environment:
     DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
-    USE_LOCAL_MODEL: "true"
     SENTINEL_CLIENT_ID: ${SENTINEL_CLIENT_ID:-}
     SENTINEL_CLIENT_SECRET: ${SENTINEL_CLIENT_SECRET:-}
   healthcheck:
@@ -386,173 +393,176 @@ The healthcheck uses `python`, not `curl` or `wget` — the slim base image ship
 
 ---
 
-## Models
+## The model
 
-Two artifacts are baked into the image. Both are `joblib` dumps of a
-`HybridSpatiotemporalEnsemble` instance (`app/models/powerful_model.py`), which wraps:
+One artifact: `artifacts/agronomic_risk.joblib` (~1.5 MB). A `HistGradientBoostingClassifier` under
+a cross-fit `CalibratedClassifierCV(method="sigmoid", cv=5)`. The bundle carries its own
+`feature_columns` and `version`, so the column contract is explicit at load time and every persisted
+prediction is traceable to the artifact behind it.
 
-- `XGBClassifier` (300 trees, lr 0.03, depth 6)
-- `HistGradientBoostingClassifier` (250 iters, lr 0.03, depth 7)
-- `RandomForestClassifier` (200 trees, depth 10)
-- `ExtraTreesClassifier` (200 trees, depth 10)
-- stacked under a `LogisticRegression` meta-learner (`cv=5`), then wrapped in
-  `CalibratedClassifierCV(method="sigmoid", cv="prefit")`
+**It is one hazard term, not the risk score.** Trained on 7,527 real samples across 185 sites and
+6 Sub-Saharan clusters. On spatially blocked evaluation it beats persistence on the operational
+ranking metric — mean precision@25 of 0.693 against 0.460, winning 5 of 6 held-out clusters — and is
+well calibrated (mean ECE 0.093). It still trails persistence on macro F1 (0.412 vs 0.450) and on
+temporal generalisation, so it contributes the vegetation hazard rather than the headline score.
 
-| File | In image | Selected by |
-| --- | --- | --- |
-| `farmerxential_model.pkl` | yes | `model_name == "farmerXential_model"` |
-| `farmerxential_powerful_model.pkl` | yes | `model_name == "farmerXential_powerful_model"` (the request-body default) |
-| `farmerxential_shap_explainer.pkl` | **no** | Training artifact only; nothing at inference time loads it |
-| `farmerxential_features.pkl` | **no** | Training artifact only |
-| `mlruns/`, `mlflow.db` | **no** | Local MLflow experiment history |
+Permutation importance on held-out ground is led by `ndmi` and `evi`, with real contributions from
+the agronomy (`et0_90`, `dry_spell_30`, `stage_kc`) — at half this sample size the model was
+effectively a smoothed persistence model, and [`docs/model-design.md` §9](docs/model-design.md)
+records both results and why they differ.
 
-At the time of writing both `*_model.pkl` files are byte-identical (both training scripts call
-`save_model` twice with the two names), so the choice of `model_name` is currently cosmetic.
-
-### Selection and caching
-
-`ModelManager.get_model(model_name, model_alias)` caches by `"{name}:{alias}"` in a plain dict for the
-process lifetime. If `USE_LOCAL_MODEL` is true **and** the name is one of the two known local names,
-it `joblib.load`s the file; anything else goes to MLflow (`models:/{name}/{alias}`) and raises a
-`ValueError` if the registry does not have it.
-
-After loading it runs `patch_model`, which walks pipelines / voting / stacking estimators and restores
-a `multi_class` attribute on any `LogisticRegression` that lacks it — a compatibility shim for pickles
-written by a different scikit-learn.
-
-### Feature alignment
-
-`FeatureStore` builds a **27**-column frame (`FEATURES` in `feature_store/features.py`: 24 survey /
-climate columns plus `ndvi`, `ndwi`, `evi`). The currently shipped `.pkl` was trained on 24 columns.
-`ModelManager._align_features` reindexes the frame to the estimator's own `feature_names_in_`, adding
-missing columns as `0` and dropping extras, so:
-
-- today the model silently ignores `ndvi` / `ndwi` / `evi`,
-- after a retrain with `train_real_production_model.py` (which does emit them) they are used
-  automatically,
-- neither direction throws `X has N features but model expects M`.
-
-That decoupling is deliberate: it lets the feature set and the model artifact move independently
-instead of requiring a lockstep redeploy.
-
-### The version-pinning constraint
-
-A `joblib` pickle stores references to the *exact internal module layout* of the scikit-learn that
-wrote it. `requirements.txt` is therefore pinned to the training-time versions:
-
-| Package | Pin |
-| --- | --- |
-| `scikit-learn` | `1.6.1` |
-| `numpy` | `2.0.2` |
-| `joblib` | `1.5.3` |
-| `xgboost` | `2.1.4` |
-
-**Retrain and bump together, never one alone.** If you regenerate the `.pkl` files under a newer
-scikit-learn, update these pins in the same commit.
+Do not promote it to the primary signal without new evidence on the same protocol.
 
 ---
 
 ## Training
 
-The training code is in two places and is the less finished half of the repo.
-
-| Path | State | What it does |
-| --- | --- | --- |
-| `train_real_production_model.py` | Current | Builds a 600-sample synthetic dataset over five Sub-Saharan farming clusters, enriched with **real** Open-Meteo ERA5 archive queries per coordinate. 5-fold stratified CV, then fits on 100% and writes both `.pkl` files plus a TreeSHAP explainer. Emits the 27-column feature set including NDVI/NDWI/EVI |
-| `train_powerful_model.py` | Superseded | Fully synthetic 3000-sample dataset, 24 columns, no spectral indices, no external calls |
-| `src/services/training-worker/train.py` | Stub | Trains a `RandomForestRegressor` on a 5-row dummy dataset and registers it in MLflow as `farmerXential_model` with alias `prod`. Not the model that serves traffic |
-| `src/services/training-worker/data_loader.py` | Stub | Hardcoded `postgresql://user:pass@localhost/db`, `SELECT * FROM training_dataset` |
-| `src/services/training-worker/evaluate.py` | Empty file | — |
-
 ```bash
-# regenerate the served artifacts
-python train_real_production_model.py
+pip install -e '.[train]'
+
+python -m argotech.training.dataset --sites 32 --years 4   # → data/training_set.parquet
+python -m argotech.training.train                          # → artifacts/agronomic_risk.joblib
 ```
 
-Both root-level training scripts `import shap`, which is **not** in `requirements.txt`. Install it
-separately (`pip install shap`) before training. It is correctly absent from the runtime image —
-nothing at inference time loads the explainer.
+The dataset is built from real measurements only: ERA5 daily reanalysis over the 90 days *before*
+each prediction date, passed through `argotech.domain`, plus the Sentinel-2 canopy state. The label
+is the peer-standardised NDVI anomaly one 30-day interval *ahead* — a future satellite observation,
+so no feature can determine its own target. Leakage controls are documented at the top of
+`argotech/training/dataset.py`.
 
-Labels are rule-derived from the climate/index signals, not observed outbreaks. Treat reported CV
-F1 as a measure of the model's ability to reproduce those rules, not of real-world disease
-prediction accuracy.
+The builder also fetches **Sentinel-1 backscatter** (`.cache/sentinel_sar/`, keyed separately so it
+can be added without invalidating the optical cache). Radar sees through cloud, which is the point:
+optical gaps cluster in the rainy season. It is additive — a site with no S1 coverage still yields
+samples, with the radar block as NaN. To measure what it buys, ablate it on the same parquet:
+
+```bash
+python -m argotech.training.train --data data/training_set.parquet             # radar on
+python -m argotech.training.train --data data/training_set.parquet --no-radar  # control
+```
+
+Compare on the *same* file. The builder keys its window off `date.today()`, so two builds made on
+different days are not a controlled comparison.
+
+### Frozen Presto embeddings (experimental)
+
+```bash
+pip install -e '.[train]'                     # adds torch + einops, training-only
+python -m argotech.training.embed --data data/training_set_sar.parquet \
+                                  --out  data/presto_embeddings.parquet
+python -m argotech.training.train --data data/training_set_sar.parquet \
+                                  --embeddings data/presto_embeddings.parquet
+```
+
+[Presto](https://arxiv.org/abs/2304.14065) is a 402K-parameter transformer pre-trained on
+remote-sensing pixel timeseries — 12 monthly steps × 17 channels. It is **vendored**
+(`models/_presto_vendored.py`, MIT) rather than installed: the published package pins `torch==2.0`
+and imports `earthengine-api` at init, so it cannot be installed alongside this project. Weights go
+in `.cache/presto/`; fetch them once with
+
+```bash
+curl -L -o .cache/presto/default_model.pt \
+  https://raw.githubusercontent.com/nasaharvest/presto/main/data/default_model.pt
+```
+
+`--no-bands` masks the ten optical reflectance channels, which is the cheaper variant that needs no
+raw-band fetch. Results and the unit-conversion traps are in
+[`docs/model-design.md` §9.1 F](docs/model-design.md).
+
+Both upstreams are cached on disk under `.cache/`. A full build takes roughly 40 minutes cold and
+seconds warm. **Open-Meteo's archive endpoint has a daily quota** that one full build can exhaust;
+if it starts returning 429 across the board, resume tomorrow — the cache preserves progress.
+
+`train.py` prints the whole evaluation, not a headline number: leave-one-cluster-out, forward
+chaining, **three** baselines (majority, persistence, site climatology), a linear shift-robustness
+arm beside the boosted trees, a decision-rule sweep, permutation importance on held-out ground,
+expected calibration error, and precision@k. Results are written to `artifacts/metrics.json`.
+
+Two transforms are applied to the parquet at train time and need no dataset rebuild, because both
+derive from columns already in it:
+
+- **Cluster-relative features** — a within-cluster z-score twin for each regionally-signatured
+  feature. The label is already standardised against the peer cohort; these stop the inputs handing
+  the model raw cluster identity. Label-free, so a held-out cluster normalising against its own
+  statistics is not leakage — it is the mechanism.
+- **Site climatology** — each field's mean prior peer anomaly, as a third baseline. It asks "is this
+  field *usually* weak", where persistence asks "is it weak *right now*".
+
+A retrain that does not beat the incumbent and all three baselines on blocked CV should not be
+promoted — and "beat" has to name a metric, because macro F1 and precision@k currently disagree.
+See [`docs/model-design.md` §6](docs/model-design.md).
 
 ---
 
 ## Troubleshooting
 
-### `ModuleNotFoundError: No module named '_loss'` on startup
+### `FileNotFoundError: Agronomic model 'artifacts/agronomic_risk.joblib' not found`
 
-**Incident, production.** `requirements.txt` was unpinned, so the image resolved scikit-learn 1.9.0
-while the `.pkl` files had been trained under 1.6.1. `joblib.load` fails because the pickle
-references internal scikit-learn modules that were moved or renamed between versions.
+The artifact is not in the working directory. In Docker it is copied to `/app/artifacts`; locally,
+run `uvicorn` from the repository root, or build it with the two training commands above.
 
-Fix: pin to the training versions (`scikit-learn==1.6.1`, `numpy==2.0.2`, `joblib==1.5.3`,
-`xgboost==2.1.4`). If you retrain, bump the pins and the models together in one change.
+### `crop_health` is null and `probabilities` are `{low: 1.0, ...}`
 
-### `ModuleNotFoundError: No module named 'torch'` — container crash loop
+No cloud-free Sentinel-2 scene, so the model did not contribute and the assessment is physics-only.
+`inference.model_contributed` is `false` and `spatiotemporal_indices.source` is `"unavailable"`.
+Check in order:
 
-**Incident, production.** `app/models/cross_attention_fusion.py` imports `torch` at module scope and
-`PredictionsService` imports that module, but `torch` was never listed in `requirements.txt` — it had
-only ever been present in the developer's venv. The container restarted forever.
+1. `SENTINEL_CLIENT_ID` / `SENTINEL_CLIENT_SECRET` are set on the container.
+2. Logs for `[SentinelClient] statistics query failed: ...`.
+3. Whether any scene under 40 % cloud exists for that AOI in the last 365 days. In the rainy season
+   this is common and expected — watch `degraded_rate` from the nightly job rather than individual
+   requests.
 
-Fix: `torch` is now in `requirements.txt`, and the Dockerfile installs the **CPU-only** wheel from
-`https://download.pytorch.org/whl/cpu` *before* the requirements step. Installing plain `torch` from
-PyPI drags in the full `nvidia-*` CUDA dependency set — roughly 2.5 GB — onto a VM with no GPU.
-Keep those two lines in that order.
+### Predictions are slow (seconds, not milliseconds)
 
-### Image builds but inference 400s with `Local model file '...' not found`
+`feature_source` is `"live"`, meaning no fresh `field_features` row. Either the nightly job has not
+run, it failed for that field, or the row is over 48 h old. Check the job's last summary.
 
-The `.pkl` files must sit in the process working directory. The Dockerfile copies them to `/app`
-(the `WORKDIR`) for exactly this reason. Locally, run `uvicorn` from the repository root.
+### `[store] prediction not persisted: relation "predictions" does not exist`
+
+The nightly job has never run, so the schema was never created. Predictions still serve — the audit
+write is best-effort by design. Run `python -m argotech.jobs.precompute --limit 1` once.
 
 ### `404 Farmer '<id>' not found in database`
 
-`/predict/farmer` requires a row in `farmer_profiles` for that `user_id`. The `farmers_ml_profiles`
-join is a `LEFT JOIN`, so a farmer with no ML profile still works — the pipeline switches to
-`GEOSPATIAL_COLDSTART_REMOTE_SENSING` mode and derives yield/shock/asset proxies from the satellite
-and weather signals instead.
+`/predict/farmer` requires a row in `farmer_profiles` for that `user_id`. `farmers_ml_profiles` is a
+`LEFT JOIN`, so a farmer with no ML profile still works — vulnerability falls back to defaults.
 
-### `spatiotemporal_indices.source` is always `"modelled"`
+### `422 Prediction requires latitude and longitude`
 
-Sentinel credentials are missing or the fetch failed. Check in order:
-
-1. `SENTINEL_CLIENT_ID` / `SENTINEL_CLIENT_SECRET` are set on the container.
-2. Container logs for `[SentinelClient] fetch_indices failed: ...`.
-3. Whether any scene under 40% cloud cover exists for that AOI in the last 30 days — a fully
-   cloud-masked window yields `sampleCount == 0` and falls back silently.
+The farmer row exists but has no coordinates. Everything in this service is geospatial; there is no
+meaningful prediction without a location.
 
 ### Build context upload is enormous / slow
 
-`.venv/` is roughly 1 GB. Confirm `.gcloudignore` exists and lists `.venv/`. Without it, gcloud
-generates one from `.gitignore`, which only excludes `venv/`.
+`.venv/` is roughly 1 GB. Confirm `.gcloudignore` exists and lists `.venv/`, `.cache/` and `data/`.
 
-### Healthcheck fails but the app looks up
+### Resolved production incidents, kept for context
 
-The compose healthcheck runs `python -c "import urllib.request; ..."` inside the container. `curl`
-and `wget` are not installed in `python:3.11-slim` — a healthcheck rewritten to use them will always
-fail regardless of service state.
+- **`ModuleNotFoundError: No module named '_loss'`** — unpinned `requirements.txt` resolved
+  scikit-learn 1.9.0 against pickles trained under 1.6.1. Pins now live in `pyproject.toml`. Still
+  latent: the artifact is a joblib pickle, so bump scikit-learn and retrain in one change. Exporting
+  to ONNX removes the class of failure.
+- **`ModuleNotFoundError: No module named 'torch'` crash loop** — `torch` was imported at module
+  scope by a PyTorch fusion layer that was never instantiated. Both the class and the dependency are
+  gone.
 
 ---
 
 ## Known issues
 
-| # | Issue | Impact | Suggested fix |
+| # | Issue | Impact | Fix |
 | --- | --- | --- | --- |
-| 1 | Images are tagged **by date** (`ml:2026-08-07c`), not by commit SHA | A tag does not identify the code that produced it; the running image cannot be traced back to a revision | The repo was containerised while carrying uncommitted work, which is why SHA tags were not usable. Commit the working tree, then switch to `ml:$(git rev-parse --short HEAD)` |
-| 2 | `requests.get(url, params={"timeout": 4})` in `_fetch_microclimate_weather_data` | This appends `?timeout=4` to the Open-Meteo URL and sets **no** request timeout. A hung Open-Meteo connection blocks a threadpool worker indefinitely | `requests.get(url, timeout=4)` |
-| 3 | `torch` is a required dependency but the PyTorch layer is never used | The `PyTorchCrossAttentionFusion` class is defined but `PredictionsService` instantiates the NumPy `CrossAttentionFusionLayer`. The import alone costs image size and startup time | Either move the `torch` import behind the class that needs it, or drop `PyTorchCrossAttentionFusion` |
-| 4 | `CrossAttentionFusionLayer` weights are fixed random draws (`np.random.seed(42)`), never trained | `fusion_score` and `peak_incubation_hour` are deterministic but carry no learned signal | Either train the layer or label the output as diagnostic |
-| 5 | `GET /predict/crop-health` returns `random` values | The backend calls it via `PredictionQueueConsumer` for `MLTaskType.CROP_HEALTH`; consumers may treat mock output as real | Implement or remove |
-| 6 | `POST /predict` always returns 400 | Dead route that still advertises a full 24-field schema in `/docs` | Remove the route and `PredictionRequest`, or implement it |
-| 7 | `requests` is imported but not in `requirements.txt` | Works only because `mlflow` pulls it in transitively; an mlflow change could break the image | Add `requests` explicitly |
-| 8 | `shap` is imported by both training scripts but not in `requirements.txt` | `python train_real_production_model.py` fails on a clean venv | Add a `requirements-train.txt` |
-| 9 | `sentinel_client.py` comments target Python 3.9; the image is 3.11 | Only a stale comment, but the `from __future__ import annotations` it justifies is now unnecessary | Update the comment |
-| 10 | `@app.on_event("startup")` / `("shutdown")` | Deprecated in current FastAPI; will warn and eventually break | Move to the `lifespan` context manager |
-| 11 | `zone` is derived from a 3-entry hardcoded `state_map` (`Kaduna`/`Kano`/`Lagos`), everything else maps to `0` | Every other state collapses into one bucket the model was not trained to distinguish | Move the mapping to config or the database |
-| 12 | The service holds direct read access to the backend's Postgres schema | Two services coupled to one table layout; a backend migration can silently break inference | Have the backend pass the farmer payload in the request body |
-| 13 | No auth on any route | Safe only because the container publishes no ports. A future `ports:` entry would expose it | Keep it network-only; add a shared secret if it ever needs exposing |
-| 14 | Both `.pkl` artifacts are byte-identical | `model_name` selection has no effect today | Either differentiate them or collapse to one |
+| 1 | `/health` returns `ok` without checking that the model loads | A container with a missing artifact passes its healthcheck and fails on the first prediction | Load the artifact in the readiness check; split liveness from readiness |
+| 2 | No circuit breaker on *our* upstream calls | The backend has Resilience4j around calls to us; we have nothing around Open-Meteo and CDSE. The nightly job absorbs most of this, the live fallback does not | Token bucket plus breaker per upstream |
+| 3 | `.cache/` is container-local | Lost on restart, not shared between replicas. Affects the training build and the climatology fetch on the live path | Move the climatology cache into Postgres |
+| 4 | The CDSE OAuth token is cached per process | N replicas make N token calls against a rate-limited endpoint | Shared cache, or accept it at current replica count |
+| 5 | Direct read access to the backend's schema | A backend migration can break inference silently | Have the backend pass the farmer payload in the request body |
+| 6 | No auth on any route | Safe only because the container publishes no ports | Keep it network-only; add a shared secret if ever exposed |
+| 7 | Model artifact is baked into the image | A model update requires an image rebuild | Pull from GCS at startup, keyed by version |
+| 8 | Farm-gate prices are a static per-crop table | `expected_loss_usd` drifts from reality | Wire to a market-price feed |
+| 9 | `has_irrigation` is not in the schema | Always 0, so vulnerability overstates every irrigated farm | Add to `farmers_ml_profiles` |
+| 10 | Images tagged by date | A tag does not identify the code that produced it | Tag with `$(git rev-parse --short HEAD)` |
+| 11 | No serving contract test | The Kotlin client's contract can drift silently | Golden-response test with mocked upstreams |
 
 ---
 
@@ -560,28 +570,34 @@ fail regardless of service state.
 
 ```
 .
-├── Dockerfile                       # production image
-├── Procfile                         # legacy PaaS entrypoint, unused in Docker
-├── requirements.txt                 # runtime deps, pinned to model training versions
-├── .dockerignore / .gcloudignore    # keep .venv and training artifacts out of the build context
-├── farmerxential_model.pkl          # served model (in image)
-├── farmerxential_powerful_model.pkl # served model (in image)
-├── farmerxential_shap_explainer.pkl # training artifact (not in image)
-├── train_real_production_model.py   # current training pipeline
-├── train_powerful_model.py          # superseded training pipeline
-└── src/services/
-    ├── inferenceService/app/
-    │   ├── main.py                  # FastAPI app, routers, OTel setup, /health
-    │   ├── api/predict.py           # /predict, /predict/farmer, /predict/coldstart
-    │   ├── api/crop_health.py       # GET /predict/crop-health (mock)
-    │   ├── core/config.py           # pydantic-settings
-    │   ├── core/container.py        # module-level FeatureStore + ModelManager singletons
-    │   ├── core/database.py         # SQLAlchemy engine + get_db dependency
-    │   ├── core/model_manager.py    # model load, cache, feature alignment, predict
-    │   ├── dependencies.py          # FastAPI Depends wrappers over the singletons
-    │   ├── feature_store/           # FEATURES schema + DataFrame builder
-    │   ├── models/                  # HybridSpatiotemporalEnsemble, cross-attention fusion
-    │   ├── schemas/                 # request / response pydantic models
-    │   └── service/                 # PredictionsService, SentinelClient
-    └── training-worker/             # MLflow registration stub, not production
+├── Dockerfile / Procfile
+├── pyproject.toml                  # single dependency source
+├── docs/model-design.md            # analysis, design, measured results, roadmap
+├── artifacts/
+│   ├── agronomic_risk.joblib       # the served model (in image)
+│   └── metrics.json                # full evaluation of the shipped artifact
+├── tests/
+│   ├── test_domain.py
+│   └── test_store.py
+└── src/argotech/
+    ├── config.py
+    ├── domain/                     # PURE: no I/O, no network, no DB. The agronomy.
+    │   ├── indices.py              #   spectral indices, VCI, anomaly, Crop Health Index
+    │   ├── agronomy.py             #   GDD, season onset, phenology, FAO-56, DSV, FAW
+    │   └── risk.py                 #   Hazard × Exposure × Vulnerability
+    ├── data/                       # I/O adapters, one per upstream
+    │   ├── meteo.py                #   Open-Meteo: ERA5 archive + forecast, disk-cached
+    │   ├── sentinel.py             #   CDSE Statistical API
+    │   ├── db.py                   #   engine + session
+    │   └── store.py                #   field_features, predictions, field_outcomes
+    ├── features/agronomic.py       # THE feature builder — training and serving both call it
+    ├── models/registry.py          # artifact loading
+    ├── jobs/precompute.py          # nightly feature job
+    ├── serving/                    # FastAPI app, routers, schemas, pipeline
+    └── training/                   # dataset construction, training + evaluation
 ```
+
+The load-bearing boundary is `domain/`: pure functions over plain values, no network, no database,
+no model artifact. That is what makes the agronomy testable in milliseconds and reusable from both
+the training pipeline and the serving path without duplication. Everything else is an adapter
+around it.
