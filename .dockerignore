@@ -1,0 +1,21 @@
+# .venv alone is 1 GB and would be uploaded as build context on every build. The image installs
+# its own dependencies from requirements.txt; nothing here is read by the Dockerfile.
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+
+.git/
+.gitignore
+.idea/
+.DS_Store
+.env
+
+# Training-time state. The image only needs artifacts/agronomic_risk.joblib, which the Dockerfile
+# copies explicitly — do not exclude artifacts/.
+.cache/
+data/
+mlruns/
+mlflow.db
+*.csv

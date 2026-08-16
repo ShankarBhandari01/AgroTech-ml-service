@@ -2,3 +2,27 @@ venv/
 __pycache__/
 *.pyc
 .env
+# macOS finder metadata — noise in every diff, never wanted in a commit.
+.DS_Store
+**/.DS_Store
+
+# IDE state. .idea/ is already partly tracked; new per-user files should not be.
+.idea/workspace.xml
+
+# Local MLflow experiment state.
+mlruns/
+mlflow.db
+
+# Editable-install metadata.
+*.egg-info/
+
+# Cached upstream responses and built datasets.
+.cache/
+/data/
+
+# Editor/hook scratch files.
+.claude/*.tmp.*
+
+# Unpromoted experiment models. Large, binary, and superseded by the next run; the metrics JSON
+# beside them is the record worth keeping. Regenerate with training/train.py --embeddings ...
+artifacts/experimental/*.joblib

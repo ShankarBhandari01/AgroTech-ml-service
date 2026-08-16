@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "argotech"
+version = "0.2.0"
+description = "AgroTech agronomic risk and crop health inference service"
+requires-python = ">=3.11"
+
+# scikit-learn stays pinned because the model artifact is still a joblib pickle, which binds to
+# scikit-learn's exact internal module layout. Retrain and bump together, never one alone. Exporting
+# to ONNX removes the pin entirely — see docs/model-design.md §7, "artifact format".
+dependencies = [
+  "fastapi",
+  "uvicorn",
+  "pydantic",
+  "pydantic-settings",
+  "sqlalchemy",
+  "psycopg2-binary",
+  "requests",
+  "pandas",
+  "scikit-learn==1.6.1",
+  "numpy==2.0.2",
+  "joblib==1.5.3",
+  "opentelemetry-sdk==1.41.1",
+  "opentelemetry-exporter-otlp-proto-http==1.41.1",
+  "opentelemetry-instrumentation-fastapi==0.62b1",
+]
+
+[project.optional-dependencies]
+# Training-only. Deliberately not in `dependencies`: torch is ~200 MB and the serving image has no
+# use for it. Frozen Presto embeddings are computed offline by `argotech.training.embed`, so only a
+# training box — or the nightly precompute job, if embeddings are ever promoted — needs this extra.
+#
+# Presto itself is vendored (`models/_presto_vendored.py`) rather than installed: the published
+# package pins torch==2.0 and numpy==1.23.5 and imports earthengine-api at package init, so it
+# cannot be installed alongside this project even with --no-deps.
+train = [
+  "pyarrow",   # parquet for the built training set
+  "torch",     # frozen Presto encoder only; no training, no GPU
+  "einops",    # required by the vendored Presto file
+]
+dev = ["pytest", "ruff"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
