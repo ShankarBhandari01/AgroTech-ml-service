@@ -149,12 +149,18 @@ def test_no_coping_gap_reads_as_though_the_farmer_has_the_thing(client):
 
 
 def test_probabilities_say_what_they_are_over(client):
-    """They describe the vegetation hazard only, and routinely disagree with `prediction`."""
+    """They describe the vegetation hazard only, and routinely disagree with `prediction`.
+
+    The caveat sits at the response root, not inside `probabilities`: the Kotlin client binds that
+    object to `Map<String, Double>`, so a string entry inside it would fail to coerce and send
+    every prediction down the FALLBACK path.
+    """
     body = _predict(client)
     probs = body["probabilities"]
-    assert {"low", "medium", "high", "of"} <= set(probs)
-    assert "vegetation hazard" in probs["of"]
-    assert abs(sum(probs[k] for k in ("low", "medium", "high")) - 1.0) < 0.02
+    assert set(probs) == {"low", "medium", "high"}, "this object must stay numeric for the client"
+    assert all(isinstance(v, (int, float)) for v in probs.values())
+    assert "vegetation hazard" in body["probabilities_of"]
+    assert abs(sum(probs.values()) - 1.0) < 0.02
 
 
 def test_a_second_identical_request_returns_the_same_answer(client):

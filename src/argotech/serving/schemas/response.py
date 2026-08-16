@@ -15,16 +15,18 @@ class PredictionProbabilities(BaseModel):
     routinely disagree with the argmax here: a field can be 66% "low" on canopy stress and still be
     CRITICAL because accumulated blight severity crossed the spray threshold.
 
-    The `of` field carries that caveat in the payload itself, because a consumer reading raw JSON
-    does not see this docstring.
+    The caveat travels in the payload as the sibling `probabilities_of` field on the response root,
+    because a consumer reading raw JSON does not see this docstring.
+
+    It is deliberately **not** a key inside this object. The Kotlin client types the field as
+    `Map<String, Double>` (`PythonMlResponse.kt`), so a string-valued entry here is not an unknown
+    property that `@JsonIgnoreProperties(ignoreUnknown = true)` would skip — it is a map value that
+    fails to coerce to Double. `FastApiMlClientImpl` catches that and returns its static FALLBACK,
+    so the effect would be every prediction silently degrading while this service reported 200.
     """
     low: float
     medium: float
     high: float
-    of: str = Field(
-        default="vegetation hazard (peer-relative canopy stress, 30-day horizon)",
-        description="What these probabilities are over. NOT overall risk — see `risk_score_percent`.",
-    )
 
 
 class InferenceDetail(BaseModel):
@@ -106,6 +108,11 @@ class PredictionResponse(BaseModel):
     probabilities: PredictionProbabilities = Field(
         description="Calibrated posterior for the *vegetation hazard* term only. Do not read its "
                     "argmax as the overall risk class — that is `prediction`.",
+    )
+    # Root-level, so an unknown-field-tolerant client ignores it safely. See PredictionProbabilities.
+    probabilities_of: str = Field(
+        default="vegetation hazard (peer-relative canopy stress, 30-day horizon)",
+        description="What `probabilities` is over. NOT overall risk — that is `risk_score_percent`.",
     )
     top_risk_factors: List[str]
     inference: InferenceDetail

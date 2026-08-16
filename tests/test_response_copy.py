@@ -33,19 +33,24 @@ def test_the_fallback_cannot_invert_meaning_either():
     assert risk.describe_gap("has_tractor").startswith("Missing:")
 
 
-def test_probabilities_carry_what_they_are_over():
-    """`probabilities` describes the vegetation hazard, not overall risk.
+def test_probabilities_contains_only_numbers():
+    """The Kotlin client types this as `Map<String, Double>` (PythonMlResponse.kt).
 
-    A consumer reading raw JSON sees low=0.66 beside prediction=2 and reasonably concludes the two
-    contradict each other; the payload has to say which question the probabilities answer.
+    A string-valued entry here is not an "unknown property" that @JsonIgnoreProperties skips — it
+    is a map value that cannot coerce to Double. FastApiMlClientImpl catches the resulting
+    exception and returns its static FALLBACK, so the symptom would be every prediction silently
+    degrading while this service reported 200. Keep this object numeric.
     """
-    p = PredictionProbabilities(low=0.662, medium=0.211, high=0.127)
-    assert "vegetation hazard" in p.of
-    assert "of" in p.model_dump(), "the caveat must survive serialisation"
+    dumped = PredictionProbabilities(low=0.662, medium=0.211, high=0.127).model_dump()
+    assert set(dumped) == {"low", "medium", "high"}, (
+        f"non-numeric key would break the Kotlin Map<String, Double> binding: {set(dumped)}")
+    assert all(isinstance(v, float) for v in dumped.values())
 
 
-def test_probabilities_still_serialise_the_original_three_keys():
-    """The Kotlin backend consumes this object; the addition must be purely additive."""
-    dumped = PredictionProbabilities(low=1.0, medium=0.0, high=0.0).model_dump()
-    assert {"low", "medium", "high"} <= set(dumped)
-    assert dumped["low"] == 1.0
+def test_the_caveat_rides_at_the_response_root_where_it_is_safe_to_ignore():
+    """`PythonMlResponse` carries @JsonIgnoreProperties(ignoreUnknown = true), so an unknown field
+    at the root is skipped rather than fatal. That is the only safe place to add one."""
+    from argotech.serving.schemas.response import PredictionResponse
+
+    field = PredictionResponse.model_fields["probabilities_of"]
+    assert "vegetation hazard" in field.default
