@@ -8,7 +8,7 @@ reason the upstream caches exist.
 Output is keyed on `(site_id, obs_date)` so `train.py` can merge it onto the sample frame without
 either file needing to know the other's row order.
 
-Run: `python -m argotech.training.embed --data data/training_set_sar.parquet`
+Run: `python -m argotech.training.embed --data data/training_set.parquet`
 """
 
 from __future__ import annotations
@@ -98,7 +98,7 @@ def build_rows(sites_per_cluster: int, years: int, wanted: set[tuple[str, str]],
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default="data/training_set_sar.parquet")
+    ap.add_argument("--data", default="data/training_set.parquet")
     ap.add_argument("--out", default="data/presto_embeddings.parquet")
     ap.add_argument("--sites", type=int, default=32)
     ap.add_argument("--years", type=int, default=4)

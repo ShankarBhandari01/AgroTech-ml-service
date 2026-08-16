@@ -1,4 +1,6 @@
 venv/
+# PyCharm's SDK for this project is registered at .venv/bin/python; a symlink to venv/ makes it resolve.
+.venv
 __pycache__/
 *.pyc
 .env

@@ -133,7 +133,7 @@ sequenceDiagram
         else missing or stale
             PS->>PS: gather_upstream() — ERA5, Sentinel-2, hourly RH, climatology
         end
-        PS->>PS: model → vegetation hazard; domain.risk → H × E × V
+        PS->>PS: model → vegetation hazard, domain.risk → H × E × V
         PS->>PG: INSERT predictions (features, version, score) → prediction_id
         PS-->>BE: PredictionResponse
     end
@@ -447,9 +447,9 @@ different days are not a controlled comparison.
 
 ```bash
 pip install -e '.[train]'                     # adds torch + einops, training-only
-python -m argotech.training.embed --data data/training_set_sar.parquet \
+python -m argotech.training.embed --data data/training_set.parquet \
                                   --out  data/presto_embeddings.parquet
-python -m argotech.training.train --data data/training_set_sar.parquet \
+python -m argotech.training.train --data data/training_set.parquet \
                                   --embeddings data/presto_embeddings.parquet
 ```
 
