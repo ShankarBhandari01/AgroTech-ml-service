@@ -100,10 +100,10 @@ def test_a_feature_set_serving_cannot_build_never_takes_the_production_path():
     # The twins became buildable when pipeline.py started deriving them; this is the assertion that
     # inverted, and it is the point of that change rather than an accident of it.
     assert artifact_path(MODEL_FEATURES) == PRODUCTION_ARTIFACT
-    assert artifact_path(list(FEATURE_COLUMNS) + ["invented"]) != PRODUCTION_ARTIFACT
+    assert artifact_path([*FEATURE_COLUMNS, "invented"]) != PRODUCTION_ARTIFACT
     # A twin of a column not in CLUSTER_RELATIVE is still unbuildable: serving standardises exactly
     # the 17 listed columns, so `_cz` is not a suffix serving can honour on demand.
-    assert artifact_path(list(FEATURE_COLUMNS) + ["days_since_onset" + CZ_SUFFIX]) \
+    assert artifact_path([*FEATURE_COLUMNS, "days_since_onset" + CZ_SUFFIX]) \
         != PRODUCTION_ARTIFACT
 
 
@@ -136,7 +136,7 @@ def test_radar_block_computes_the_ratio_and_peer_anomaly():
 
 def test_nearest_sar_pairs_within_tolerance_and_refuses_beyond_it():
     """S1 and S2 do not share an orbit, so the join is nearest-date with a tolerance."""
-    from argotech.training.dataset import nearest_sar
+    from argotech.features.agronomic import nearest_sar
 
     sar = [
         {"sensing_date": "2025-03-01", "rvi": 0.1},
@@ -197,7 +197,7 @@ def test_cohorts_reject_non_finite_peers():
     """A NaN peer poisons the whole cohort's mean and sd, and crashes pstdev on Python 3.12."""
     import statistics
 
-    from argotech.training.dataset import _finite
+    from argotech.features.agronomic import finite as _finite
 
     assert _finite(0.5) and _finite(0) and _finite(-1.2)
     assert not _finite(float("nan"))
@@ -215,3 +215,35 @@ def test_cohorts_reject_non_finite_peers():
     clean = [v for v in poisoned if _finite(v)]
     assert statistics.pstdev(clean) == statistics.pstdev([0.4, 0.5])
     assert crashed or statistics.pstdev(poisoned) != statistics.pstdev(clean)
+
+
+# ---------------------------------------------------------------------------------------------
+# Ranking metric
+# ---------------------------------------------------------------------------------------------
+
+def test_rank_correlation_sign_and_degenerate_cases():
+    """rho > 0 must mean "ranked the right way round".
+
+    The sign is the whole risk here: `forward_z` is an anomaly where *low* is bad while the risk
+    score runs the other way, so an unnegated Spearman would report a good model as a bad one and
+    quietly invert every comparison against the baselines.
+    """
+    import numpy as np
+
+    from argotech.training.train import rank_correlation
+
+    z = np.array([-2.0, -1.0, 0.0, 1.0, 2.0])      # -2.0 is the worst-off field
+    perfect = np.array([5.0, 4.0, 3.0, 2.0, 1.0])  # ranks it most at risk
+    assert rank_correlation(perfect, z) == 1.0
+    assert rank_correlation(-perfect, z) == -1.0
+
+    # Monotone-invariant: rescaling the risk score must not move rho.
+    assert rank_correlation(perfect * 100 + 7, z) == 1.0
+
+    # An arm that scores every field the same has no ordering, so rho is undefined rather than 0.0 —
+    # 0.0 would read as "ranks no better than chance", which is a measurement, not an absence of one.
+    assert np.isnan(rank_correlation(np.zeros(5), z))
+    assert np.isnan(rank_correlation(np.array([1.0, 2.0]), np.array([1.0, 2.0])))   # n < 3
+
+    # A NaN target is dropped, not propagated: forward_z is absent for a handful of rows.
+    assert rank_correlation(perfect, np.array([-2.0, -1.0, 0.0, 1.0, float("nan")])) == 1.0

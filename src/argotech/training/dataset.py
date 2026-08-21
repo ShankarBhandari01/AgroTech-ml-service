@@ -45,6 +45,8 @@ from argotech.features.agronomic import (
     FEATURE_COLUMNS,
     WINDOW_DAYS,
     build,
+    finite,
+    nearest_sar,
     radar_block,
     satellite_block,
 )
@@ -150,42 +152,6 @@ def bands_history(site: dict, days: int) -> list[dict]:
     )
 
 
-def _finite(value) -> bool:
-    """True for a real, usable measurement.
-
-    Cached upstream responses predate the current filtering and can still contain JSON `NaN`, and a
-    NaN peer silently poisons a whole cohort's mean and standard deviation — every z-score computed
-    against it becomes NaN. On Python 3.12 `statistics.pstdev` additionally *raises* on such a list
-    ("'float' object has no attribute 'numerator'"), so the same defect is a crash on one interpreter
-    and silent corruption on another. Filtering at cohort-construction time fixes both.
-    """
-    return isinstance(value, (int, float)) and value == value and value not in (float("inf"), float("-inf"))
-
-
-def nearest_sar(sar: list[dict], target: str, max_gap_days: int = 20) -> dict | None:
-    """The radar observation closest in time to an optical sensing date, or None.
-
-    Sentinel-1 and Sentinel-2 do not share an orbit, so their P30D aggregation windows close on
-    different days. Pairing by nearest date within a tolerance is the join; requiring an exact match
-    would discard almost everything.
-
-    `max_gap_days` is deliberately under the 30-day aggregation interval: a radar window centred
-    more than 20 days from the optical one describes a different point in the crop cycle.
-    """
-    if not sar:
-        return None
-    t = date.fromisoformat(target)
-    best, best_gap = None, max_gap_days + 1
-    for obs in sar:
-        try:
-            gap = abs((date.fromisoformat(obs["sensing_date"]) - t).days)
-        except ValueError:
-            continue
-        if gap < best_gap:
-            best, best_gap = obs, gap
-    return best
-
-
 def collect_site(site: dict, years: int) -> dict | None:
     """Fetch both upstreams for one site. Returns None when either is unusable."""
     days = years * 365
@@ -227,7 +193,7 @@ def build_samples(sites: list[dict]) -> pd.DataFrame:
     cohort: dict[tuple[str, str], list[float]] = {}
     for s in sites:
         for obs in s["history"]:
-            if _finite(obs.get("ndvi")):
+            if finite(obs.get("ndvi")):
                 cohort.setdefault((s["cluster"], obs["sensing_date"]), []).append(obs["ndvi"])
 
     # The radar peer cohort is keyed on the *optical* date each SAR observation was matched to, so
@@ -237,7 +203,7 @@ def build_samples(sites: list[dict]) -> pd.DataFrame:
     for s in sites:
         for obs in s["history"]:
             matched = nearest_sar(s.get("sar", []), obs["sensing_date"])
-            if matched and _finite(matched.get("rvi")):
+            if matched and finite(matched.get("rvi")):
                 sar_cohort.setdefault((s["cluster"], obs["sensing_date"]), []).append(matched["rvi"])
 
     rows = []
@@ -259,7 +225,7 @@ def build_samples(sites: list[dict]) -> pd.DataFrame:
 
             window = {k2: v[end_idx - WINDOW_DAYS:end_idx] for k2, v in s["daily"].items()}
             peers_now = [v for v in cohort.get((s["cluster"], obs["sensing_date"]), []) if v != obs["ndvi"]]
-            past_ndvi = [o["ndvi"] for o in history[:k] if _finite(o.get("ndvi"))]
+            past_ndvi = [o["ndvi"] for o in history[:k] if finite(o.get("ndvi"))]
 
             matched_sar = nearest_sar(s.get("sar", []), obs["sensing_date"])
             sar_peers = [v for v in sar_cohort.get((s["cluster"], obs["sensing_date"]), [])

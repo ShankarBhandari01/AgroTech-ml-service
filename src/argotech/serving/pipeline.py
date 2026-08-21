@@ -13,8 +13,9 @@ terms. See docs/model-design.md §4.5.
 from __future__ import annotations
 
 import functools
+import logging
 import uuid
-from typing import Any, Optional
+from typing import Any
 
 import pandas as pd
 import requests
@@ -23,6 +24,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from argotech.config import settings
 from argotech.data import meteo, store
 from argotech.data.sentinel import sentinel_client
 from argotech.domain import agronomy, indices, risk
@@ -31,6 +33,9 @@ from argotech.features.agronomic import (
     assign_cluster,
     build,
     cluster_relative_row,
+    finite,
+    nearest_sar,
+    radar_block,
     satellite_block,
 )
 from argotech.models.registry import ModelManager
@@ -47,7 +52,35 @@ from argotech.serving.schemas.response import (
     VulnerabilityDetail,
 )
 
+logger = logging.getLogger(__name__)
+
 OPEN_METEO_TIMEOUT_SECONDS = 6
+
+# Written into `predictions.model_version` on the persistence path, so a stored row is always
+# traceable to what produced it. Bump it if `vegetation_hazard_from_anomaly` changes shape.
+PERSISTENCE_VERSION = "persistence-v1"
+
+
+def _severity_to_probabilities(hazard: float) -> PredictionProbabilities:
+    """Encode a scalar vegetation hazard as the 3-class vector the Kotlin client requires.
+
+    `probabilities` is typed `Map<String, Double>` downstream and is not optional, so the
+    persistence path has to emit three numbers. Rather than invent a posterior it does not have,
+    this puts all the mass on the two classes adjacent to the hazard value — the unique distribution
+    that reproduces the model path's own summary statistic:
+
+        h = 0.5 * p_medium + 1.0 * p_high
+
+    so a consumer computing expected severity gets the identical number from either source. It is an
+    encoding of one scalar, not a confidence, and `probabilities_of` says so on the wire.
+    """
+    h = max(0.0, min(1.0, hazard))
+    if h <= 0.5:
+        low, medium, high = 1.0 - 2.0 * h, 2.0 * h, 0.0
+    else:
+        low, medium, high = 0.0, 2.0 - 2.0 * h, 2.0 * h - 1.0
+    return PredictionProbabilities(low=round(low, 3), medium=round(medium, 3), high=round(high, 3))
+
 
 # ponytail: farm-gate prices as a static per-crop table in USD/tonne. Exposure needs a price to be
 # expressed in currency at all; wire it to a market-price feed when one exists.
@@ -70,13 +103,16 @@ def _leaf_wetness(lat: float, lon: float) -> list:
         hourly = res.json().get("hourly", {})
         temps, rhs = hourly.get("temperature_2m", []), hourly.get("relative_humidity_2m", [])
     except Exception as e:  # noqa: BLE001
-        print(f"[pipeline] hourly weather unavailable: {e}")
+        logger.warning("hourly weather unavailable for (%.4f, %.4f): %s", lat, lon, e)
         return []
 
     days = []
     for start in range(0, len(temps) - 23, 24):
         t_day = [t for t in temps[start:start + 24] if t is not None]
-        wet = [t for t, rh in zip(temps[start:start + 24], rhs[start:start + 24])
+        # strict=False deliberately: Open-Meteo can return a shorter humidity series than
+        # temperature one on a partial response, and a short day is worth fewer wet hours — not a
+        # 500 on the whole prediction.
+        wet = [t for t, rh in zip(temps[start:start + 24], rhs[start:start + 24], strict=False)
                if t is not None and rh is not None and rh >= 90]
         if wet:
             days.append((sum(wet) / len(wet), len(wet)))
@@ -95,6 +131,7 @@ async def gather_upstream(lat: float, lon: float, crop: str) -> tuple[dict, dict
     """
     payload = await run_in_threadpool(functools.partial(meteo.fetch_recent, lat, lon, 92))
     history = await run_in_threadpool(sentinel_client.fetch_history, lat, lon, 365)
+    sar = await run_in_threadpool(sentinel_client.fetch_sar_history, lat, lon, 365)
     wet_days = await run_in_threadpool(_leaf_wetness, lat, lon)
 
     if not payload:
@@ -109,7 +146,13 @@ async def gather_upstream(lat: float, lon: float, crop: str) -> tuple[dict, dict
         latest = history[-1]
         series = [o["ndvi"] for o in history]
         mean = sum(series) / len(series)
-        sat = satellite_block(latest, series[:-1], series[:-1])
+        # Radar joins on the nearest date within `nearest_sar`'s tolerance, the same join the
+        # training set was built with. Peers are the site's own past observations, mirroring what
+        # the optical block above does — serving has no concurrent cross-site cohort, and inventing
+        # a second convention for radar would be a skew of its own.
+        matched_sar = nearest_sar(sar, latest["sensing_date"])
+        sat = {**satellite_block(latest, series[:-1], series[:-1]),
+               **radar_block(matched_sar, [o["rvi"] for o in sar[:-1] if finite(o.get("rvi"))])}
         crop_health = indices.crop_health_index(
             current_ndvi=latest["ndvi"], ndmi_value=latest["ndwi"],
             ndvi_min=min(series), ndvi_max=max(series),
@@ -157,8 +200,9 @@ class PredictionsService:
         # body. Reject it here as the not-found it actually is.
         try:
             uuid.UUID(str(self.data.farmer_id))
-        except (ValueError, AttributeError, TypeError):
-            raise HTTPException(404, f"Farmer '{self.data.farmer_id}' not found in database.")
+        except (ValueError, AttributeError, TypeError) as e:
+            raise HTTPException(
+                404, f"Farmer '{self.data.farmer_id}' not found in database.") from e
 
         query = text("""
             SELECT
@@ -191,6 +235,11 @@ class PredictionsService:
         if lat is None or lon is None:
             raise HTTPException(422, "Prediction requires latitude and longitude.")
         lat, lon = float(lat), float(lon)
+        # The coldstart schema bounds its own input; this covers the farmer path, where the
+        # coordinates come out of farmer_profiles unvalidated. Out of range they reach Open-Meteo
+        # and CDSE as a 400 each, and the request degrades into a prediction built from nothing.
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            raise HTTPException(422, f"Coordinates ({lat}, {lon}) are out of range.")
         crop = self._crop_name(farmer)
         field_id = self.data.farmer_id
 
@@ -209,16 +258,19 @@ class PredictionsService:
         crop_health = ctx.get("crop_health")
         dsv_total, spray_due = ctx["dsv_total"], ctx["spray_due"]
 
-        # ---- learned vegetation hazard ------------------------------------
+        # ---- vegetation hazard --------------------------------------------
         vegetation_hazard, probabilities = 0.0, None
         model_version = "none"
-        if index_source == "sentinel-2":
+        probabilities_of = PredictionResponse.model_fields["probabilities_of"].default
+        if index_source == "sentinel-2" and settings.VEGETATION_HAZARD_SOURCE == "model":
             model, columns, model_version, bounds, stats = self.model_manager.agronomic_model()
             # Derived here rather than in `gather_upstream` so a `field_features` row stored by an
             # older precompute run still gets its twins — they are arithmetic over the raw row and
             # the artifact's snapshot, with no upstream call to pay for.
             cluster = assign_cluster(lat, lon, bounds)
             row = {**row, **cluster_relative_row(row, stats.get(cluster))}
+            logger.info("field=%s vegetation hazard from model %s (cluster %s)",
+                        field_id, model_version, cluster)
             proba = await run_in_threadpool(model.predict_proba, pd.DataFrame([row])[columns])
             p = proba[0]
             # Expected severity on 0-1: the ranking score, and the term fed into the composition.
@@ -226,6 +278,13 @@ class PredictionsService:
             probabilities = PredictionProbabilities(low=round(float(p[0]), 3),
                                                     medium=round(float(p[1]), 3),
                                                     high=round(float(p[2]), 3))
+        elif index_source == "sentinel-2":
+            # Persistence. No artifact is loaded on this path at all.
+            vegetation_hazard = risk.vegetation_hazard_from_anomaly(row.get("ndvi_z_peer"))
+            model_version = PERSISTENCE_VERSION
+            probabilities = _severity_to_probabilities(vegetation_hazard)
+            probabilities_of = ("vegetation hazard (peer-relative canopy stress, 30-day horizon) — "
+                                "encoded from the persistence carry-forward, not a fitted posterior")
 
         # ---- composition ---------------------------------------------------
         hazard = risk.assess_hazard(
@@ -242,6 +301,11 @@ class PredictionsService:
         )
         vulnerability = risk.assess_vulnerability(self._coping_signals(farmer))
         assessment = risk.assess_risk(hazard, exposure, vulnerability)
+
+        logger.info("field=%s crop=%s features=%s indices=%s model=%s -> %s risk=%s%% "
+                    "dominant=%s vegetation=%.3f", field_id, crop, feature_source, index_source,
+                    model_version, assessment.severity, assessment.risk_score, hazard.dominant,
+                    vegetation_hazard)
 
         # ---- audit row -----------------------------------------------------
         # Written before the response is returned so the id can be handed back: the agent app links
@@ -270,6 +334,7 @@ class PredictionsService:
             priority_label={0: "Low Priority", 1: "Medium Priority", 2: "High Priority"}[pred_val],
             risk_score_percent=assessment.risk_score,
             probabilities=probabilities or PredictionProbabilities(low=1.0, medium=0.0, high=0.0),
+            probabilities_of=probabilities_of,
             top_risk_factors=drivers,
             inference=InferenceDetail(
                 risk_level=assessment.severity,

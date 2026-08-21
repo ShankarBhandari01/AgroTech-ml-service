@@ -11,6 +11,7 @@ All computation delegates to `argotech.domain`, which is pure and separately tes
 from __future__ import annotations
 
 import math
+from datetime import date
 
 from argotech.domain import agronomy, indices
 
@@ -184,6 +185,42 @@ def _round_or_nan(value: float, digits: int) -> float:
     return float("nan") if value is None or value != value else round(value, digits)
 
 
+def finite(value) -> bool:
+    """True for a real, usable measurement.
+
+    Cached upstream responses predate the current filtering and can still contain JSON `NaN`, and a
+    NaN peer silently poisons a whole cohort's mean and standard deviation — every z-score computed
+    against it becomes NaN. On Python 3.12 `statistics.pstdev` additionally *raises* on such a list
+    ("'float' object has no attribute 'numerator'"), so the same defect is a crash on one interpreter
+    and silent corruption on another. Filtering at cohort-construction time fixes both.
+    """
+    return isinstance(value, (int, float)) and value == value and value not in (float("inf"), float("-inf"))
+
+
+def nearest_sar(sar: list[dict], target: str, max_gap_days: int = 20) -> dict | None:
+    """The radar observation closest in time to an optical sensing date, or None.
+
+    Sentinel-1 and Sentinel-2 do not share an orbit, so their P30D aggregation windows close on
+    different days. Pairing by nearest date within a tolerance is the join; requiring an exact match
+    would discard almost everything.
+
+    `max_gap_days` is deliberately under the 30-day aggregation interval: a radar window centred
+    more than 20 days from the optical one describes a different point in the crop cycle.
+    """
+    if not sar:
+        return None
+    t = date.fromisoformat(target)
+    best, best_gap = None, max_gap_days + 1
+    for obs in sar:
+        try:
+            gap = abs((date.fromisoformat(obs["sensing_date"]) - t).days)
+        except ValueError:
+            continue
+        if gap < best_gap:
+            best, best_gap = obs, gap
+    return best
+
+
 def build(daily: dict, sat: dict, site: dict, crop: str = agronomy.DEFAULT_CROP) -> dict:
     """One feature row.
 
@@ -203,7 +240,7 @@ def build(daily: dict, sat: dict, site: dict, crop: str = agronomy.DEFAULT_CROP)
     tmax30, tmin30 = w30["temperature_2m_max"], w30["temperature_2m_min"]
     rain30, et030 = w30["precipitation_sum"], w30["et0_fao_evapotranspiration"]
 
-    gdd_daily = [agronomy.growing_degree_days(lo, hi) for lo, hi in zip(tmin90, tmax90)]
+    gdd_daily = [agronomy.growing_degree_days(lo, hi) for lo, hi in zip(tmin90, tmax90, strict=True)]
 
     # Phenology, anchored on the rainy-season onset within the window rather than assumed.
     onset = agronomy.season_onset_index(rain90)
