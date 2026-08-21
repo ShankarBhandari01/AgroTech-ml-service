@@ -8,11 +8,14 @@ unknown at load time. This artifact carries its own `feature_columns`, so the co
 and the shims are unnecessary.
 """
 
+import logging
 import os
 
 import joblib
 
 from argotech.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class ModelManager:
@@ -39,5 +42,8 @@ class ModelManager:
             version = bundle.get("version") or f"n{bundle['n_samples']}@{bundle['trained_on']}"
             self._agronomic = (bundle["model"], bundle["feature_columns"], version,
                                bundle.get("cluster_bounds") or {}, bundle.get("cluster_stats") or {})
-            print(f"Loaded agronomic model {version}")
+            logger.info("Loaded agronomic model %s from %s: %s, %d features, %d clusters, "
+                        "trained on %s", version, os.path.abspath(path),
+                        type(bundle["model"]).__name__, len(bundle["feature_columns"]),
+                        len(self._agronomic[3]), bundle.get("trained_on"))
         return self._agronomic

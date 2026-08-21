@@ -6,18 +6,17 @@ starts accumulating from the day the endpoint exists, which is why it ships long
 can train on it.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, HTTPException
 
 from argotech.data import store
-from argotech.data.db import get_db
+from argotech.serving.deps import DbSessionDep
 from argotech.serving.schemas.request import OutcomeRequest
 
 router = APIRouter()
 
 
 @router.post("/outcomes", status_code=201)
-def record_outcome(payload: OutcomeRequest, db: Session = Depends(get_db)) -> dict:
+def record_outcome(payload: OutcomeRequest, db: DbSessionDep) -> dict:
     """Record what actually happened to a field, optionally linked to the prediction that flagged it."""
     try:
         outcome_id = store.write_outcome(
@@ -32,14 +31,14 @@ def record_outcome(payload: OutcomeRequest, db: Session = Depends(get_db)) -> di
             notes=payload.notes,
             reported_by=payload.reported_by,
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         db.rollback()
-        raise HTTPException(500, f"Could not record outcome: {e}")
+        raise HTTPException(500, f"Could not record outcome: {e}") from e
     return {"outcome_id": outcome_id, "field_id": payload.field_id}
 
 
 @router.get("/outcomes/label-count")
-def label_count(horizon_days: int = 30, db: Session = Depends(get_db)) -> dict:
+def label_count(db: DbSessionDep, horizon_days: int = 30) -> dict:
     """How many prediction/outcome pairs exist — i.e. how close phase 3 is to being possible.
 
     Deliberately exposed: "we have N labels" is the number that decides when supervised modelling
