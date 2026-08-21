@@ -39,11 +39,20 @@ class ModelManager:
                     f"Agronomic model '{path}' not found. Build it with "
                     "`python -m argotech.training.dataset` then `python -m argotech.training.train`.")
             bundle = joblib.load(path)
+            target = bundle.get("target")
+            if target != "forward_z":
+                raise ValueError(
+                    f"Artifact '{path}' declares target {target!r}; serving requires 'forward_z'. "
+                    "This is refused rather than adapted to: a classifier's `.predict()` returns "
+                    "class labels 0/1/2, which the hazard map reads as near-zero anomalies, so "
+                    "every field would silently report almost no canopy hazard. Retrain with "
+                    "`python -m argotech.training.dataset` then `python -m argotech.training.train`."
+                )
             version = bundle.get("version") or f"n{bundle['n_samples']}@{bundle['trained_on']}"
             self._agronomic = (bundle["model"], bundle["feature_columns"], version,
                                bundle.get("cluster_bounds") or {}, bundle.get("cluster_stats") or {})
-            logger.info("Loaded agronomic model %s from %s: %s, %d features, %d clusters, "
+            logger.info("Loaded agronomic model %s from %s: %s on %s, %d features, %d clusters, "
                         "trained on %s", version, os.path.abspath(path),
-                        type(bundle["model"]).__name__, len(bundle["feature_columns"]),
+                        type(bundle["model"]).__name__, target, len(bundle["feature_columns"]),
                         len(self._agronomic[3]), bundle.get("trained_on"))
         return self._agronomic

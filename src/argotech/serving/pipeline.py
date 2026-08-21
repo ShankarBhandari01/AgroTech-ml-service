@@ -262,29 +262,28 @@ class PredictionsService:
         vegetation_hazard, probabilities = 0.0, None
         model_version = "none"
         probabilities_of = PredictionResponse.model_fields["probabilities_of"].default
-        if index_source == "sentinel-2" and settings.VEGETATION_HAZARD_SOURCE == "model":
-            model, columns, model_version, bounds, stats = self.model_manager.agronomic_model()
-            # Derived here rather than in `gather_upstream` so a `field_features` row stored by an
-            # older precompute run still gets its twins — they are arithmetic over the raw row and
-            # the artifact's snapshot, with no upstream call to pay for.
-            cluster = assign_cluster(lat, lon, bounds)
-            row = {**row, **cluster_relative_row(row, stats.get(cluster))}
-            logger.info("field=%s vegetation hazard from model %s (cluster %s)",
-                        field_id, model_version, cluster)
-            proba = await run_in_threadpool(model.predict_proba, pd.DataFrame([row])[columns])
-            p = proba[0]
-            # Expected severity on 0-1: the ranking score, and the term fed into the composition.
-            vegetation_hazard = float(p[1] * 0.5 + p[2] * 1.0)
-            probabilities = PredictionProbabilities(low=round(float(p[0]), 3),
-                                                    medium=round(float(p[1]), 3),
-                                                    high=round(float(p[2]), 3))
-        elif index_source == "sentinel-2":
-            # Persistence. No artifact is loaded on this path at all.
-            vegetation_hazard = risk.vegetation_hazard_from_anomaly(row.get("ndvi_z_peer"))
-            model_version = PERSISTENCE_VERSION
+        if index_source == "sentinel-2":
+            if settings.VEGETATION_HAZARD_SOURCE == "model":
+                model, columns, model_version, bounds, stats = self.model_manager.agronomic_model()
+                # Derived here rather than in `gather_upstream` so a `field_features` row stored by
+                # an older precompute run still gets its twins — arithmetic over the raw row and
+                # the artifact's snapshot, with no upstream call to pay for.
+                cluster = assign_cluster(lat, lon, bounds)
+                row = {**row, **cluster_relative_row(row, stats.get(cluster))}
+                zhat = await run_in_threadpool(model.predict, pd.DataFrame([row])[columns])
+                forecast_z = float(zhat[0])
+                logger.info("field=%s forecast_z=%+.3f from model %s (cluster %s)",
+                            field_id, forecast_z, model_version, cluster)
+            else:
+                # Persistence: the field's *observed* anomaly, carried forward unchanged.
+                forecast_z, model_version = row.get("ndvi_z_peer"), PERSISTENCE_VERSION
+
+            # One mapping for both sources. The paths differ only in where z comes from — observed
+            # today, or predicted 30 days out — so the A/B compares exactly one thing.
+            vegetation_hazard = risk.vegetation_hazard_from_anomaly(forecast_z)
             probabilities = _severity_to_probabilities(vegetation_hazard)
             probabilities_of = ("vegetation hazard (peer-relative canopy stress, 30-day horizon) — "
-                                "encoded from the persistence carry-forward, not a fitted posterior")
+                                "encoded from a scalar, not a fitted posterior")
 
         # ---- composition ---------------------------------------------------
         hazard = risk.assess_hazard(

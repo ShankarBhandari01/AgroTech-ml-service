@@ -487,12 +487,13 @@ def permutation_importance_blocked(df: pd.DataFrame, seed: int = 0, repeats: int
     cluster = max(df.cluster.unique())
     train, test = df[df.cluster != cluster], df[df.cluster == cluster]
     ytr = train.label.to_numpy()
-    model = make_model().fit(train[MODEL_FEATURES], ytr)
+    ztr = train.forward_z.to_numpy(dtype=float)
+    ok = np.isfinite(ztr)
+    model = make_regressor().fit(train[MODEL_FEATURES][ok], ztr[ok])
     Xte, yte = test[MODEL_FEATURES].copy(), test.label.to_numpy()
 
     def macro(X):
-        return f1_score(yte, decide(expected_severity(model.predict_proba(X)), ytr),
-                        average="macro", zero_division=0)
+        return f1_score(yte, decide(-model.predict(X), ytr), average="macro", zero_division=0)
 
     base = macro(Xte)
     rng = np.random.default_rng(seed)
@@ -601,9 +602,11 @@ def main() -> None:
     # Final artifact: fitted on everything, since the estimates above already tell us what it is worth.
     print("\nFitting final model on all data ...")
     y_all = df.label.to_numpy()
-    final = make_model().fit(df[MODEL_FEATURES], y_all)
+    z_all = df.forward_z.to_numpy(dtype=float)
+    ok = np.isfinite(z_all)
+    final = make_regressor().fit(df[MODEL_FEATURES][ok], z_all[ok])
     holdout = df[df.cluster == max(df.cluster.unique())]
-    held_risk = expected_severity(final.predict_proba(holdout[MODEL_FEATURES]))
+    held_risk = -final.predict(holdout[MODEL_FEATURES])
     print("(in-sample for the held-out cluster — the blocked numbers above are the honest ones)")
     print(classification_report(holdout.label, decide(held_risk, y_all), zero_division=0, digits=3))
 
@@ -632,6 +635,9 @@ def main() -> None:
                            for c in CLUSTERS},
         "classes": [0, 1, 2],
         "label": "peer-standardised NDVI anomaly 30 days ahead",
+        # The serving contract. `label` above is prose for a human; this is the machine-checked
+        # key that stops a classifier artifact being read as a regressor. See registry.py.
+        "target": "forward_z",
         "thresholds": {"severe_z": SEVERE_Z, "elevated_z": ELEVATED_Z},
         "n_samples": len(df),
         "trained_on": f"{df.obs_date.min()}..{df.obs_date.max()}",
