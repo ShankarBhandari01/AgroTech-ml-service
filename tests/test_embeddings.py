@@ -145,7 +145,7 @@ def test_batches_are_grouped_so_every_item_shares_a_mask_pattern():
 
 def test_end_to_end_embedding_is_finite_and_varies_with_input():
     """The real encoder on real-shaped input. Guards the whole pipeline, not just the arithmetic."""
-    torch = pytest.importorskip("torch")
+    pytest.importorskip("torch")
     from pathlib import Path
 
     from argotech.models.embeddings import embed, load_encoder
@@ -224,16 +224,15 @@ def test_a_failed_fetch_is_never_cached():
     memoises a transient CDSE 429 as a permanent fact about the site.
     """
     import json as _json
-
-    from argotech.training.dataset import _cached_fetch
-
     import tempfile
     from pathlib import Path as _Path
+
+    from argotech.training.dataset import _cached_fetch
 
     with tempfile.TemporaryDirectory() as d:
         path = _Path(d) / "site.json"
 
-        assert _cached_fetch(path, lambda: []) == []
+        assert _cached_fetch(path, list) == []
         assert not path.exists(), "an empty (possibly failed) result must not be cached"
 
         good = [{"sensing_date": "2025-01-31", "b02": 0.1}]

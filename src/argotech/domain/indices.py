@@ -10,7 +10,7 @@ Band references are Sentinel-2 L2A: B02 blue, B04 red, B05/B06/B07 red-edge, B08
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 
 
 def _norm_diff(a: float, b: float) -> float:

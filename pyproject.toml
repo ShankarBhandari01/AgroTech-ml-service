@@ -21,6 +21,9 @@ dependencies = [
   "requests",
   "pandas",
   "scikit-learn==1.6.1",
+  # Already present transitively via scikit-learn; declared because training imports spearmanr
+  # directly. Unpinned: only `scipy.stats.spearmanr` is used and its contract has been stable.
+  "scipy",
   "numpy==2.0.2",
   "joblib==1.5.3",
   "opentelemetry-sdk==1.41.1",
@@ -52,3 +55,25 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 110
+# Vendored upstream (see the `train` extra above). It is kept byte-comparable to the Presto release
+# so it can be re-vendored by diff; reformatting it would destroy that.
+extend-exclude = ["src/argotech/models/_presto_vendored.py"]
+
+[tool.ruff.lint]
+# Pinned rather than left to the default, so `ruff check` means the same thing here, in CI, and in
+# whatever editor is attached. Everything selected here currently passes at zero.
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "ASYNC", "BLE", "PIE", "FURB", "RUF"]
+
+ignore = [
+  # `value != value` is this codebase's NaN test, used identically in the feature builder, the
+  # embedding packer and the training set. It is deliberate, not a mistaken self-comparison.
+  "PLR0124",
+]
+
+# Deliberately *not* selected:
+#
+# DTZ — naive-datetime rules. `store.py` stores and compares naive UTC timestamps ("Naive
+# timestamps are assumed UTC"), and Postgres `timestamp without time zone` is the column type
+# backing it. Adopting DTZ means migrating the column, the freshness comparison and the outcome
+# join together; it is a real piece of work, not a lint sweep, so it stays visible as a TODO here
+# rather than as 8 permanently-suppressed warnings.

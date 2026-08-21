@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import time
 
 from sqlalchemy import text
 
@@ -76,7 +75,7 @@ async def run(limit: int | None = None, delay: float = DELAY_SECONDS) -> dict:
                 print(f"  [{i}/{len(fields)}] {f['field_id']}: {e}")
             if i % 50 == 0:
                 print(f"  {i}/{len(fields)} — ok {ok}, degraded {degraded}, failed {failed}")
-            time.sleep(delay)
+            await asyncio.sleep(delay)
 
         pruned = store.prune_features(db)
         # `degraded` is the quality metric worth alerting on: it is the share of the farmer base for

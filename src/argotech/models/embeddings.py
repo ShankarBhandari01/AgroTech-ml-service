@@ -100,7 +100,7 @@ def linear_to_db(power: float) -> float:
 
 def _monthly_mean(values: list[float], months: list[str], target: str) -> float:
     """Mean of `values` whose YYYY-MM equals `target`, or NaN when the month is unobserved."""
-    picked = [v for v, m in zip(values, months) if m == target and v == v]
+    picked = [v for v, m in zip(values, months, strict=True) if m == target and v == v]
     return sum(picked) / len(picked) if picked else float("nan")
 
 
@@ -138,7 +138,7 @@ def build_input(daily: dict, optical: list[dict], sar: list[dict], elevation: fl
 
     daily_months = [t[:7] for t in daily["time"]]
     temps = [(hi + lo) / 2.0 for hi, lo in
-             zip(daily["temperature_2m_max"], daily["temperature_2m_min"])]
+             zip(daily["temperature_2m_max"], daily["temperature_2m_min"], strict=True)]
     rain = daily["precipitation_sum"]
 
     opt_months = [o["sensing_date"][:7] for o in optical]
@@ -220,7 +220,7 @@ def embed(encoder, arrays: list[np.ndarray], masks: list[np.ndarray],
 
     out = np.zeros((len(arrays), 128), dtype=np.float32)
     buckets: dict[tuple, list[int]] = {}
-    for i, (mask, month) in enumerate(zip(masks, months)):
+    for i, (mask, month) in enumerate(zip(masks, months, strict=True)):
         buckets.setdefault(batch_key(mask, month), []).append(i)
 
     with torch.no_grad():

@@ -107,7 +107,7 @@ def main() -> None:
     args = ap.parse_args()
 
     samples = pd.read_parquet(args.data, columns=["site_id", "obs_date"])
-    wanted = set(zip(samples.site_id, samples.obs_date))
+    wanted = set(zip(samples.site_id, samples.obs_date, strict=True))
     print(f"{len(wanted)} (site, date) pairs to embed")
 
     out = build_rows(args.sites, args.years, wanted, with_bands=not args.no_bands)

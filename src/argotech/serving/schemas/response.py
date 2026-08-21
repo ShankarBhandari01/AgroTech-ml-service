@@ -1,5 +1,4 @@
 from datetime import datetime
-from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -33,7 +32,7 @@ class InferenceDetail(BaseModel):
     risk_level: str
     dominant_hazard: str
     probability: float
-    primary_drivers: List[str]
+    primary_drivers: list[str]
     # False when no Sentinel-2 scene was available and the assessment rests on physics alone.
     model_contributed: bool = True
 
@@ -50,7 +49,7 @@ class HazardDetail(BaseModel):
 class VulnerabilityDetail(BaseModel):
     score: float
     coping_capacity: float
-    gaps: List[str]
+    gaps: list[str]
 
 
 class RiskAssessmentDetail(BaseModel):
@@ -77,7 +76,7 @@ class SpatiotemporalIndices(BaseModel):
     vci: float
     canopy_stress_status: str
     source: str = "modelled"
-    sensing_date: Optional[str] = None
+    sensing_date: str | None = None
 
 
 class MicroclimateMetrics(BaseModel):
@@ -95,11 +94,11 @@ class PredictionResponse(BaseModel):
     field_id: str
     # Handle for the audit row. Pass it back on POST /outcomes to link what happened to what was
     # predicted — this is the join that produces training labels.
-    prediction_id: Optional[int] = None
+    prediction_id: int | None = None
     model_version: str = "none"
     # "precomputed" when served from the nightly feature table, "live" when computed in-request.
     feature_source: str = "live"
-    features_computed_at: Optional[datetime] = None
+    features_computed_at: datetime | None = None
     crop_type: str
     phenology_stage: str
     prediction: int
@@ -114,10 +113,10 @@ class PredictionResponse(BaseModel):
         default="vegetation hazard (peer-relative canopy stress, 30-day horizon)",
         description="What `probabilities` is over. NOT overall risk — that is `risk_score_percent`.",
     )
-    top_risk_factors: List[str]
+    top_risk_factors: list[str]
     inference: InferenceDetail
     risk_assessment: RiskAssessmentDetail
-    crop_health: Optional[CropHealthDetail] = None
+    crop_health: CropHealthDetail | None = None
     spatiotemporal_indices: SpatiotemporalIndices
     microclimate_metrics: MicroclimateMetrics
     recommended_action: str

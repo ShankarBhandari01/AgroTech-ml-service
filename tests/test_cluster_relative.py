@@ -17,7 +17,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from argotech.features.agronomic import (  # noqa: E402
+from argotech.features.agronomic import (
     CLUSTER_RELATIVE,
     CZ_SUFFIX,
     add_cluster_relative,
