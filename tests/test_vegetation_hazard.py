@@ -68,9 +68,11 @@ def test_persistence_out_ranks_the_hard_ramp_it_replaced():
 
 
 def test_the_default_hazard_source_is_the_model():
-    """The classifier lost to persistence on rho (0.196 vs 0.351), which is why the default was
-    `persistence`. The regressor draws level (0.342) and beats it on P@25 (0.741 vs 0.51), so the
-    default flips. Pinned because the justifying comment in config.py must not outlive its numbers.
+    """The classifier lost to persistence on rho, which is why the default was `persistence`. The
+    regressor draws level on rho (0.377 against 0.368 and climatology's 0.363) and wins on P@25
+    (0.760 against 0.467 and 0.680), so the default flips. Numbers are the six-fold spatial means in
+    `artifacts/metrics.json`. Pinned because the justifying comment in config.py must not outlive
+    its numbers.
     """
     from argotech.config import Settings
 

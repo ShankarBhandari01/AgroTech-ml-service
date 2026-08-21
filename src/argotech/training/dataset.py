@@ -65,6 +65,12 @@ CLUSTERS = [
 LABEL_HORIZON_INTERVALS = 1     # one P30D bucket ahead
 SEVERE_Z, ELEVATED_Z = -1.0, -0.35
 
+# `SentinelClient._stats` omits an interval with no valid statistics, so "the next bucket" is the
+# next *cloud-free* one, not the next 30 days. Measured over the cached histories, 7% of samples
+# were 60-240 days ahead and pooled into a target everything downstream calls a 30-day forecast.
+# 45 days admits the normal 30-day bucket (and its few days of aggregation slack) and nothing else.
+MAX_LABEL_GAP_DAYS = 45
+
 CACHE_DIR = Path(".cache/sentinel")
 SAR_CACHE_DIR = Path(".cache/sentinel_sar")
 BANDS_CACHE_DIR = Path(".cache/sentinel_bands")
@@ -163,10 +169,17 @@ def collect_site(site: dict, years: int) -> dict | None:
     if not payload or len(history) < 6:
         return None
 
+    daily = meteo.daily_frame(payload)
+    # A variable missing from the whole response is an upstream failure, not a weather condition.
+    # Every feature derived from it would be a confident fabrication; drop the site instead.
+    if not meteo.has_all_variables(daily):
+        print(f"[dataset] {site['site_id']}: incomplete ERA5 variables, site dropped")
+        return None
+
     return {
         **site,
         "elevation": payload.get("elevation", 0.0),
-        "daily": meteo.daily_frame(payload),
+        "daily": daily,
         "history": history,
         # Radar is additive, never a gate: a site with no S1 coverage still yields samples, with the
         # SAR block absent. Gating on it would shrink the dataset to buy a feature.
@@ -218,6 +231,20 @@ def build_samples(sites: list[dict]) -> pd.DataFrame:
                 continue
             label_obs = future[0]
 
+            # The horizon has to *be* 30 days. A cloudy month is skipped by the upstream, so the
+            # next bucket can sit 60-240 days out; those are a different forecasting problem, not a
+            # noisier version of this one.
+            gap = (date.fromisoformat(label_obs["sensing_date"])
+                   - date.fromisoformat(obs["sensing_date"])).days
+            if gap > MAX_LABEL_GAP_DAYS:
+                continue
+
+            # `satellite_block` does no filtering of its own, so a NaN observation reaches the row
+            # as NaN ndvi/ndmi/evi/ndvi_z_peer. The cohort above already excludes it, so this sample
+            # has no canopy state at all — there is nothing left for it to teach.
+            if not finite(obs.get("ndvi")):
+                continue
+
             # Align the satellite date onto the weather series; require a full look-back window.
             end_idx = time_index.get(obs["sensing_date"])
             if end_idx is None or end_idx < WINDOW_DAYS:
@@ -248,12 +275,19 @@ def build_samples(sites: list[dict]) -> pd.DataFrame:
             if sd < 1e-6:
                 continue
             z = (label_obs["ndvi"] - mean) / sd
+            # `NaN <= SEVERE_Z` is False and so is `NaN <= ELEVATED_Z`, which would label an
+            # *unobserved* outcome "healthy". An absent label is not a class.
+            if not finite(z):
+                continue
             row["label"] = 2 if z <= SEVERE_Z else (1 if z <= ELEVATED_Z else 0)
 
             row["forward_z"] = round(z, 4)
             row["site_id"] = s["site_id"]
             row["cluster"] = s["cluster"]
             row["obs_date"] = obs["sensing_date"]
+            # The date the label was actually observed, so the horizon guard above is auditable and
+            # a temporal split can be honest about when each outcome became known.
+            row["label_date"] = label_obs["sensing_date"]
             rows.append(row)
 
     return pd.DataFrame(rows)

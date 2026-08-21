@@ -34,26 +34,50 @@ import json
 from pathlib import Path
 
 import pytest
+import requests
 from fastapi.testclient import TestClient
 
 from argotech.data import meteo
 from argotech.data.db import get_db
 from argotech.data.sentinel import sentinel_client
 from argotech.domain import risk
+from argotech.serving import pipeline
 from argotech.serving.main import app
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
+# 14 days of moderate leaf wetness: 12 wet hours at 20 °C is DSV 1 under Wallin's 15.1-26.6 °C band,
+# so 14 accumulated, below the spray threshold of 18. Deliberately non-zero — `_leaf_wetness` used to
+# be left unstubbed, and on a machine without network it returns `[]`, which is a *zero* disease
+# hazard that no assertion could distinguish from a correctly computed one.
+LEAF_WETNESS_DAYS = [(20.0, 12)] * 14
+
 
 @pytest.fixture
 def client(monkeypatch):
-    """The app with its network and database edges replaced, and nothing else."""
+    """The app with its network and database edges replaced, and nothing else.
+
+    Every upstream is stubbed, and then `requests` itself is broken, so a newly added live call
+    fails loudly instead of silently returning empty and degrading the assessment. That is not
+    belt-and-braces: `fetch_sar_history` and `_leaf_wetness` were both missing from this list, both
+    returned `[]` without credentials, and the radar features and the whole disease term went to
+    zero — which is precisely the regression this suite exists to catch.
+    """
     payload = json.loads((FIXTURES / "meteo_recent.json").read_text())
     history = json.loads((FIXTURES / "sentinel_history.json").read_text())
+    sar = json.loads((FIXTURES / "sentinel_sar_history.json").read_text())
 
     monkeypatch.setattr(meteo, "fetch_recent", lambda *a, **k: payload)
     monkeypatch.setattr(meteo, "climatological_rain_30", lambda *a, **k: 95.0)
     monkeypatch.setattr(sentinel_client, "fetch_history", lambda *a, **k: history)
+    monkeypatch.setattr(sentinel_client, "fetch_sar_history", lambda *a, **k: sar)
+    monkeypatch.setattr(pipeline, "_leaf_wetness", lambda *a, **k: list(LEAF_WETNESS_DAYS))
+
+    def _no_network(*a, **k):
+        raise AssertionError(f"live HTTP call from a hermetic test: {a[:1]}")
+
+    for verb in ("get", "post", "put", "request"):
+        monkeypatch.setattr(requests, verb, _no_network)
 
     app.dependency_overrides[get_db] = lambda: None
     try:
@@ -101,12 +125,47 @@ def test_a_vegetation_hazard_term_actually_contributed(client):
 
     body = _predict(client)
     assert body["inference"]["model_contributed"] is True
-    assert body["risk_assessment"]["hazard"]["vegetation"] > 0.0
 
     expected = "agro-" if settings.VEGETATION_HAZARD_SOURCE == "model" else PERSISTENCE_VERSION
     assert body["model_version"].startswith(expected), (
         f"{settings.VEGETATION_HAZARD_SOURCE} path must stamp its own version, "
         f"got {body['model_version']!r}")
+
+
+class _FixedZ:
+    """An artifact stand-in that predicts one forward_z, whatever the row."""
+
+    def __init__(self, z: float):
+        self.z = z
+
+    def predict(self, X):
+        return [self.z] * len(X)
+
+
+def _vegetation_hazard_for(client, monkeypatch, z: float) -> float:
+    from argotech.config import settings
+    from argotech.serving.container import model_manager
+
+    monkeypatch.setattr(settings, "VEGETATION_HAZARD_SOURCE", "model")
+    _, columns, version, bounds, stats = model_manager.agronomic_model()
+    monkeypatch.setattr(model_manager, "_agronomic", (_FixedZ(z), columns, version, bounds, stats))
+    return _predict(client)["risk_assessment"]["hazard"]["vegetation"]
+
+
+def test_the_model_path_moves_the_vegetation_hazard_the_right_way_and_far_enough(client, monkeypatch):
+    """Direction *and* magnitude, through the real serving branch.
+
+    The assertion this replaces was `vegetation > 0.0`, which passes at 0.119 — the value the hazard
+    map returns for z = 0, i.e. exactly the "silent near-zero for every field" symptom it was meant
+    to catch. Only the artifact's `predict` is substituted; cluster assignment, the `_cz` twins, the
+    logistic hazard map and the noisy-OR composition all run for real.
+    """
+    stressed = _vegetation_hazard_for(client, monkeypatch, -2.0)
+    assert stressed > 0.5, f"a field predicted 2 sd behind its peers must carry real hazard, got {stressed}"
+
+    healthy = _vegetation_hazard_for(client, monkeypatch, 2.0)
+    assert healthy < 0.05, f"a field predicted 2 sd ahead of its peers must carry almost none, got {healthy}"
+    assert stressed > healthy
 
 
 def test_the_risk_composition_arithmetic_holds_end_to_end(client):

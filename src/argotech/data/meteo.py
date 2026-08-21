@@ -119,15 +119,40 @@ def daily_frame(payload: dict) -> dict[str, list]:
     """Pull the daily block out of either endpoint's response, with None gaps filled forward.
 
     ERA5 has occasional single-day gaps; a None in the middle of a rainfall series would otherwise
-    propagate a TypeError into every downstream sum.
+    propagate a TypeError into every downstream sum, so those are carried forward from the previous
+    day. Two cases are *not* filled, because filling them fabricates weather rather than bridging it:
+
+    * A **leading** gap has no previous day to carry. The old seed of 0.0 turned it into observed
+      zero rainfall and zero evapotranspiration; it is back-filled from the first real value instead.
+    * A **wholly absent** variable — the key missing from the response, or every value None — has
+      nothing to fill from at all. It returns NaN, not 90 days of zeros. That distinction is not
+      cosmetic: a missing `et0_fao_evapotranspiration` read as zeros moves `water_satisfaction_30`
+      from 0.221 to 1.000 and flips the dominant hazard from drought to disease, in a 200 OK.
+      `has_all_variables` is how callers refuse such a frame; this module never substitutes.
     """
     daily = payload["daily"]
+    n = len(daily["time"])
     out = {"time": daily["time"]}
     for var in DAILY_VARS:
-        series = daily.get(var) or [None] * len(daily["time"])
-        filled, last = [], 0.0
+        series = daily.get(var) or []
+        observed = [v for v in series if v is not None]
+        if not observed:
+            out[var] = [float("nan")] * n
+            continue
+        filled, last = [], float(observed[0])
         for v in series:
             last = float(v) if v is not None else last
             filled.append(last)
         out[var] = filled
     return out
+
+
+def has_all_variables(daily: dict) -> bool:
+    """False when `daily_frame` returned a wholly-absent (all-NaN) series for any daily variable.
+
+    The refusal gate. Downstream is not NaN-safe in the direction that matters — `water_balance`
+    computes `max(0.0, NaN - supply)` and `min(1.0, supply / NaN)`, and both of those return the
+    *finite* operand, so an absent ET0 series arrives as "demand fully satisfied, zero deficit"
+    rather than as missingness. Callers drop the site (training) or return 503 (serving).
+    """
+    return all(any(v == v for v in daily.get(var, ())) for var in DAILY_VARS)

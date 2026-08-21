@@ -139,6 +139,10 @@ async def gather_upstream(lat: float, lon: float, crop: str) -> tuple[dict, dict
     daily = meteo.daily_frame(payload)
     if len(daily["time"]) < WINDOW_DAYS:
         raise HTTPException(503, "Insufficient weather history for the 90-day feature window.")
+    # A variable absent from the whole response would otherwise be read as an observed zero series:
+    # no evapotranspiration means no water demand, so the field looks perfectly watered. Refuse.
+    if not meteo.has_all_variables(daily):
+        raise HTTPException(503, "Weather upstream returned an incomplete variable set.")
 
     # ---- canopy state ----
     crop_health = None
@@ -282,8 +286,8 @@ class PredictionsService:
             # 30 days out — but the logistic centre/softness are the same fixed constants either way.
             # That makes the *ranking* comparison like-for-like (the rho/P@25 gain that justified this
             # switch). It does not make the *magnitude* comparable: a regressor predicts a conditional
-            # mean, which is compressed relative to the observation it predicts (std 0.54 vs. 1.18 on
-            # the training set), so the model path yields systematically smaller vegetation hazards
+            # mean, which is compressed relative to the observation it predicts (std 0.508 vs. 1.165
+            # on the training set), so the model path yields systematically smaller vegetation hazards
             # than persistence would have for the same field — a gap the rank metrics cannot see.
             vegetation_hazard = risk.vegetation_hazard_from_anomaly(forecast_z)
             probabilities = _severity_to_probabilities(vegetation_hazard)

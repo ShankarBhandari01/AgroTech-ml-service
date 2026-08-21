@@ -65,7 +65,7 @@ EXPERIMENT_DIR = Path("artifacts/experimental")
 SERVABLE_FEATURES = frozenset(FEATURE_COLUMNS) | {c + CZ_SUFFIX for c in CLUSTER_RELATIVE}
 
 
-def artifact_path(features: list[str]) -> Path:
+def artifact_path(features: list[str], experimental: bool = False) -> Path:
     """Where this model may be written, decided by whether serving can actually feed it.
 
     `serving/pipeline.py` builds one row from `FEATURE_COLUMNS`, appends the `_cz` twins via
@@ -74,11 +74,19 @@ def artifact_path(features: list[str]) -> Path:
     prediction. That is a train/serve skew of exactly the kind documented as P0-2 in
     docs/model-design.md, so it is a guard rather than a comment: a feature set serving cannot build
     does not get the production path.
+
+    `experimental` is the other half, and servability cannot express it: an ablation like
+    `--no-radar` trains on a *subset* of the servable set, so it passes the check above and then
+    replaces the deployed model and `artifacts/metrics.json` with a control arm. A run that is not
+    training the production feature set does not get the production path either.
     """
-    if set(features) <= SERVABLE_FEATURES:
+    if not experimental and set(features) <= SERVABLE_FEATURES:
         return PRODUCTION_ARTIFACT
     EXPERIMENT_DIR.mkdir(parents=True, exist_ok=True)
-    return EXPERIMENT_DIR / "agronomic_risk_clusterrel.joblib"
+    # Distinct names, or the ablation overwrites the record of the extra-feature experiment instead
+    # of the record of production — the same defect one directory down.
+    return EXPERIMENT_DIR / ("agronomic_risk_ablation.joblib" if experimental
+                             else "agronomic_risk_clusterrel.joblib")
 
 
 def make_model(seed: int = 42) -> CalibratedClassifierCV:
@@ -120,11 +128,12 @@ def make_linear(seed: int = 42):
     (0.207 R^2 units) and the tree ensembles the largest (0.284). If this arm closes on the boosted
     trees out-of-cluster, that is a statement about the ceiling of the feature set, obtained cheaply.
 
-    The median imputer is the arm's handicap, not a preprocessing detail: 13 rows have no usable
-    Sentinel-2 observation and 210 have no peer cohort, and `HistGradientBoostingClassifier` routes
-    those down its own missing-value branch rather than guessing a value. Imputing to the median
-    tells the linear model a cloudy field is an average field. That is a real disadvantage for this
-    arm and it is the honest comparison, since removing the rows would change the test set.
+    The median imputer is the arm's handicap, not a preprocessing detail: 35 of 6,957 rows have no
+    Sentinel-1 pass within tolerance of their optical date, so their five radar columns are NaN, and
+    the boosted arms route those down their own missing-value branch rather than guessing a value.
+    Imputing to the median tells the linear model a radar-less field has average backscatter. That
+    is a real disadvantage for this arm and it is the honest comparison, since removing the rows
+    would change the test set.
     """
     return make_pipeline(
         SimpleImputer(strategy="median"),
@@ -140,10 +149,11 @@ def make_regressor(seed: int = 42) -> HistGradientBoostingRegressor:
     they are asked to predict — minus the `CalibratedClassifierCV` wrapper, because a regressor
     emits a number and there is no posterior to calibrate.
 
-    Why this is the production arm: over 5 seeds x 6 leave-one-cluster-out folds, regressing the
-    continuous target lifts Spearman rho from 0.196 to 0.342 — an improvement in *every one of the
-    30 folds* — and P@25 from 0.669 to 0.741, while macro F1 is unchanged within seed noise.
-    Discretising before fitting told the model that z = -0.34 and z = +6.9 were the same outcome.
+    Why this is the production arm: over the six leave-one-cluster-out folds in
+    `artifacts/metrics.json` (seed 42), regressing the continuous target lifts Spearman rho from the
+    classifier's 0.235 to 0.377 — better in 5 of the 6 folds — and P@25 from 0.647 to 0.760, better
+    in 5 of 6, while macro F1 moves only 0.421 to 0.441. Discretising before fitting told the model
+    that z = -0.34 and z = +6.9 were the same outcome.
     """
     return HistGradientBoostingRegressor(
         max_iter=300,
@@ -610,12 +620,14 @@ def main() -> None:
     print("(in-sample for the held-out cluster — the blocked numbers above are the honest ones)")
     print(classification_report(holdout.label, decide(held_risk, y_all), zero_division=0, digits=3))
 
-    artifact = artifact_path(MODEL_FEATURES)
+    artifact = artifact_path(MODEL_FEATURES, experimental=args.no_radar)
     artifact.parent.mkdir(parents=True, exist_ok=True)
     if artifact != PRODUCTION_ARTIFACT:
-        print(f"\n!! {len(set(MODEL_FEATURES) - SERVABLE_FEATURES)} features are not buildable by "
-              f"serving/pipeline.py; writing to {artifact} instead of the production path.")
-        print(f"   Not buildable: {sorted(set(MODEL_FEATURES) - SERVABLE_FEATURES)}")
+        unbuildable = sorted(set(MODEL_FEATURES) - SERVABLE_FEATURES)
+        reason = (f"{len(unbuildable)} features are not buildable by serving/pipeline.py: "
+                  f"{unbuildable}" if unbuildable else
+                  "this is an ablation, not the production feature set")
+        print(f"\n!! {reason}; writing to {artifact} instead of the production path.")
     # Metrics live beside their artifact, or an experimental run silently overwrites the record of
     # what production is actually doing.
     metrics_path = artifact.with_name("metrics.json" if artifact == PRODUCTION_ARTIFACT

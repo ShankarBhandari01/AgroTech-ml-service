@@ -3,8 +3,6 @@ the arm table shaped so `evaluate_fold` knows which target each arm is fitted ag
 
 from __future__ import annotations
 
-import numpy as np
-
 
 def test_make_regressor_matches_the_classifier_base_hyperparameters():
     """Both arms must differ only in what they predict, or the comparison measures the wrong thing."""
@@ -27,14 +25,8 @@ def test_arms_declare_which_target_each_is_fitted_against():
     assert ARMS["linear"][1] == "label"
     assert set(ARMS) == {"hgbr", "hgb", "linear"}, "the classifier stays as a control arm"
 
-
-def test_regressor_ranks_a_worse_field_higher():
-    """risk = -predicted_z, so a field predicted to fall further behind must rank above one that
-    does not. Gets the sign right, which is invisible in aggregate metrics until the queue inverts."""
-    from argotech.training.train import make_regressor
-
-    x = np.arange(200, dtype=float).reshape(-1, 1)
-    z = -x[:, 0] / 100.0                      # higher x -> lower z -> worse field
-    fitted = make_regressor(42).fit(x, z)
-    risk = -fitted.predict(np.array([[10.0], [190.0]]))
-    assert risk[1] > risk[0], "the field with the lower predicted z must carry the higher risk"
+# The `risk = -predicted_z` sign convention is pinned by
+# `test_the_model_path_moves_the_vegetation_hazard_the_right_way_and_far_enough` in
+# tests/test_e2e_predict.py, on the real serving path. The test that used to live here fitted a
+# regressor inside the test body and asserted it was monotone on monotone data — sklearn's property,
+# touching neither train.py nor pipeline.py.
