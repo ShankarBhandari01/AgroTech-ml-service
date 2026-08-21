@@ -27,15 +27,17 @@ Run: `python -m argotech.training.train`
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import joblib
 import numpy as np
 import pandas as pd
+from scipy.stats import spearmanr
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import balanced_accuracy_score, classification_report, f1_score
@@ -44,31 +46,48 @@ from sklearn.preprocessing import StandardScaler
 
 from argotech.features.agronomic import (
     CLUSTER_RELATIVE,
+    CZ_SUFFIX,
     FEATURE_COLUMNS,
     MODEL_FEATURES,
     RADAR_FEATURES,
     UNINFORMATIVE,
     add_cluster_relative,
+    cluster_stats,
+    peer_stats,
 )
-from argotech.training.dataset import ELEVATED_Z, SEVERE_Z
+from argotech.training.dataset import CLUSTERS, ELEVATED_Z, SEVERE_Z
 
 PRODUCTION_ARTIFACT = Path("artifacts/agronomic_risk.joblib")
 EXPERIMENT_DIR = Path("artifacts/experimental")
 
 
-def artifact_path(features: list[str]) -> Path:
+# What `serving/pipeline.py` can put in front of the model: the raw row from `agronomic.build`, plus
+# the cluster-relative twins it now derives from the `cluster_stats` snapshot carried in the bundle.
+SERVABLE_FEATURES = frozenset(FEATURE_COLUMNS) | {c + CZ_SUFFIX for c in CLUSTER_RELATIVE}
+
+
+def artifact_path(features: list[str], experimental: bool = False) -> Path:
     """Where this model may be written, decided by whether serving can actually feed it.
 
-    `serving/pipeline.py` builds one row from `FEATURE_COLUMNS` and slices it by the artifact's own
-    `feature_columns`. A model trained on anything outside that set — the cluster-relative twins, for
-    instance — would load fine and then raise a KeyError on the first live prediction. That is a
-    train/serve skew of exactly the kind documented as P0-2 in docs/model-design.md, so it is a guard
-    rather than a comment: a feature set serving cannot build does not get the production path.
+    `serving/pipeline.py` builds one row from `FEATURE_COLUMNS`, appends the `_cz` twins via
+    `cluster_relative_row`, and slices the result by the artifact's own `feature_columns`. A model
+    trained on anything outside that set would load fine and then raise a KeyError on the first live
+    prediction. That is a train/serve skew of exactly the kind documented as P0-2 in
+    docs/model-design.md, so it is a guard rather than a comment: a feature set serving cannot build
+    does not get the production path.
+
+    `experimental` is the other half, and servability cannot express it: an ablation like
+    `--no-radar` trains on a *subset* of the servable set, so it passes the check above and then
+    replaces the deployed model and `artifacts/metrics.json` with a control arm. A run that is not
+    training the production feature set does not get the production path either.
     """
-    if set(features) <= set(FEATURE_COLUMNS):
+    if not experimental and set(features) <= SERVABLE_FEATURES:
         return PRODUCTION_ARTIFACT
     EXPERIMENT_DIR.mkdir(parents=True, exist_ok=True)
-    return EXPERIMENT_DIR / "agronomic_risk_clusterrel.joblib"
+    # Distinct names, or the ablation overwrites the record of the extra-feature experiment instead
+    # of the record of production — the same defect one directory down.
+    return EXPERIMENT_DIR / ("agronomic_risk_ablation.joblib" if experimental
+                             else "agronomic_risk_clusterrel.joblib")
 
 
 def make_model(seed: int = 42) -> CalibratedClassifierCV:
@@ -110,11 +129,12 @@ def make_linear(seed: int = 42):
     (0.207 R^2 units) and the tree ensembles the largest (0.284). If this arm closes on the boosted
     trees out-of-cluster, that is a statement about the ceiling of the feature set, obtained cheaply.
 
-    The median imputer is the arm's handicap, not a preprocessing detail: 13 rows have no usable
-    Sentinel-2 observation and 210 have no peer cohort, and `HistGradientBoostingClassifier` routes
-    those down its own missing-value branch rather than guessing a value. Imputing to the median
-    tells the linear model a cloudy field is an average field. That is a real disadvantage for this
-    arm and it is the honest comparison, since removing the rows would change the test set.
+    The median imputer is the arm's handicap, not a preprocessing detail: 35 of 6,957 rows have no
+    Sentinel-1 pass within tolerance of their optical date, so their five radar columns are NaN, and
+    the boosted arms route those down their own missing-value branch rather than guessing a value.
+    Imputing to the median tells the linear model a radar-less field has average backscatter. That
+    is a real disadvantage for this arm and it is the honest comparison, since removing the rows
+    would change the test set.
     """
     return make_pipeline(
         SimpleImputer(strategy="median"),
@@ -123,8 +143,38 @@ def make_linear(seed: int = 42):
     )
 
 
-# The arms evaluated side by side in every fold. The first is the production candidate.
-ARMS = {"hgb": make_model, "linear": make_linear}
+def make_regressor(seed: int = 42) -> HistGradientBoostingRegressor:
+    """The production arm: predict `forward_z` itself rather than its three-way discretisation.
+
+    Same hyperparameters as `make_model`'s base estimator — the two arms must differ only in what
+    they are asked to predict — minus the `CalibratedClassifierCV` wrapper, because a regressor
+    emits a number and there is no posterior to calibrate.
+
+    Why this is the production arm: over the six leave-one-cluster-out folds in
+    `artifacts/metrics.json` (seed 42), regressing the continuous target lifts Spearman rho from the
+    classifier's 0.235 to 0.377 — better in 5 of the 6 folds — and P@25 from 0.647 to 0.760, better
+    in 5 of 6, while macro F1 moves only 0.421 to 0.441. Discretising before fitting told the model
+    that z = -0.34 and z = +6.9 were the same outcome.
+    """
+    return HistGradientBoostingRegressor(
+        max_iter=300,
+        learning_rate=0.06,
+        max_depth=5,
+        min_samples_leaf=25,
+        l2_regularization=1.0,
+        early_stopping=True,
+        validation_fraction=0.15,
+        random_state=seed,
+    )
+
+
+# (factory, target column). The target decides which column is fitted and how a risk score is
+# derived; `evaluate_fold` branches on it. `hgbr` is production; the other two are controls kept
+# so the metrics file keeps reporting what the change gave up rather than deleting the evidence.
+ARMS = {"hgbr": (make_regressor, "forward_z"),
+        "hgb": (make_model, "label"),
+        "linear": (make_linear, "label")}
+PRODUCTION_ARM = "hgbr"
 
 # Rebound by `--seed`. Only the boosted arm is genuinely stochastic: `HistGradientBoostingClassifier`
 # draws its own early-stopping validation split from `random_state`, whereas lbfgs logistic
@@ -254,7 +304,7 @@ def expected_calibration_error(y_true: np.ndarray, proba: np.ndarray, bins: int 
     correct = (pred == y_true).astype(float)
     edges = np.linspace(0, 1, bins + 1)
     ece = 0.0
-    for lo, hi in zip(edges[:-1], edges[1:]):
+    for lo, hi in itertools.pairwise(edges):
         m = (conf > lo) & (conf <= hi)
         if m.sum():
             ece += m.mean() * abs(correct[m].mean() - conf[m].mean())
@@ -278,11 +328,34 @@ def precision_at_k(y_true: np.ndarray, risk: np.ndarray, k: int) -> float:
     return float((y_true[top] >= 1).mean())
 
 
+def rank_correlation(risk: np.ndarray, forward_z: np.ndarray) -> float:
+    """Spearman between the risk ranking and the actual canopy shortfall it is ordering.
+
+    P@25 asks one question at one cut point, and macro-F1 asks a classification question the product
+    never asks — the queue is a ranking, and `label` is a three-way discretisation of `forward_z`
+    thrown away before it is scored. This measures the ordering against the continuous target
+    directly, over every field rather than the top 25.
+
+        rho = Spearman( s_i , -z_i )
+
+    Negated because `forward_z` is a peer-standardised NDVI anomaly, so *low* is bad, while the risk
+    score s runs the other way. Positive rho therefore means correctly ordered. Scale-free and
+    monotone-invariant, so it is unaffected by how the risk score is calibrated — which is exactly
+    the property P@25 lacks.
+    """
+    ok = np.isfinite(risk) & np.isfinite(forward_z)
+    # Two distinct points cannot produce a rank correlation, and a constant arm yields NaN anyway.
+    if ok.sum() < 3:
+        return float("nan")
+    rho = spearmanr(risk[ok], -forward_z[ok])[0]
+    return round(float(rho), 4) if np.isfinite(rho) else float("nan")
+
+
 def _score(name: str, y_true: np.ndarray, y_pred: np.ndarray, proba: np.ndarray | None = None,
-           risk: np.ndarray | None = None) -> dict:
+           risk: np.ndarray | None = None, forward_z: np.ndarray | None = None) -> dict:
     out = {
         "split": name,
-        "n": int(len(y_true)),
+        "n": len(y_true),
         "macro_f1": round(float(f1_score(y_true, y_pred, average="macro", zero_division=0)), 4),
         "balanced_accuracy": round(float(balanced_accuracy_score(y_true, y_pred)), 4),
     }
@@ -291,6 +364,8 @@ def _score(name: str, y_true: np.ndarray, y_pred: np.ndarray, proba: np.ndarray 
     if risk is not None:
         for k in (10, 25, 50):
             out[f"precision_at_{k}"] = round(precision_at_k(y_true, risk, min(k, len(risk))), 4)
+        if forward_z is not None:
+            out["spearman"] = rank_correlation(risk, forward_z)
     return out
 
 
@@ -311,16 +386,25 @@ def evaluate_fold(name: str, train: pd.DataFrame, test: pd.DataFrame, oof: list 
     """
     ytr, yte = train.label.to_numpy(), test.label.to_numpy()
     Xtr, Xte = train[MODEL_FEATURES], test[MODEL_FEATURES]
+    zte = test.forward_z.to_numpy(dtype=float)
 
-    result = {"split": name, "n": int(len(yte))}
-    for arm, factory in ARMS.items():
-        proba = factory(SEED).fit(Xtr, ytr).predict_proba(Xte)
-        risk = expected_severity(proba)
-        scored = _score(name, yte, decide(risk, ytr), proba, risk)
+    result = {"split": name, "n": len(yte)}
+    ztr = train.forward_z.to_numpy(dtype=float)
+    for arm, (factory, target) in ARMS.items():
+        if target == "forward_z":
+            # Fit only where the target is observed; never drop a row from *evaluation*.
+            ok = np.isfinite(ztr)
+            fitted = factory(SEED).fit(Xtr[ok], ztr[ok])
+            proba, risk = None, -fitted.predict(Xte)
+        else:
+            fitted = factory(SEED).fit(Xtr, ytr)
+            proba = fitted.predict_proba(Xte)
+            risk = expected_severity(proba)
+        scored = _score(name, yte, decide(risk, ytr), proba, risk, zte)
         for key, value in scored.items():
             if key not in ("split", "n"):
-                result[f"{key}_{arm}" if arm != "hgb" else key] = value
-        if oof is not None and arm == "hgb":
+                result[f"{key}_{arm}" if arm != PRODUCTION_ARM else key] = value
+        if oof is not None and arm == PRODUCTION_ARM:
             oof.append((yte, risk, persistence_risk(test), climatology_risk(test), ytr))
 
     result.update({
@@ -329,6 +413,10 @@ def evaluate_fold(name: str, train: pd.DataFrame, test: pd.DataFrame, oof: list 
         "baseline_persistence_p25": round(precision_at_k(yte, persistence_risk(test), min(25, len(yte))), 4),
         "baseline_climatology_f1": _macro(yte, baseline_climatology(test)),
         "baseline_climatology_p25": round(precision_at_k(yte, climatology_risk(test), min(25, len(yte))), 4),
+        # The baselines are ranked by the same continuous target, so rho is the one number on which
+        # model and baseline are directly comparable without a decision rule in between.
+        "baseline_persistence_spearman": rank_correlation(persistence_risk(test), zte),
+        "baseline_climatology_spearman": rank_correlation(climatology_risk(test), zte),
     })
     return result
 
@@ -407,15 +495,16 @@ def permutation_importance_blocked(df: pd.DataFrame, seed: int = 0, repeats: int
     fitting, including columns that only helped it memorise. Permutation importance on unseen ground
     describes what actually carries transferable signal.
     """
-    cluster = sorted(df.cluster.unique())[-1]
+    cluster = max(df.cluster.unique())
     train, test = df[df.cluster != cluster], df[df.cluster == cluster]
     ytr = train.label.to_numpy()
-    model = make_model().fit(train[MODEL_FEATURES], ytr)
+    ztr = train.forward_z.to_numpy(dtype=float)
+    ok = np.isfinite(ztr)
+    model = make_regressor().fit(train[MODEL_FEATURES][ok], ztr[ok])
     Xte, yte = test[MODEL_FEATURES].copy(), test.label.to_numpy()
 
     def macro(X):
-        return f1_score(yte, decide(expected_severity(model.predict_proba(X)), ytr),
-                        average="macro", zero_division=0)
+        return f1_score(yte, decide(-model.predict(X), ytr), average="macro", zero_division=0)
 
     base = macro(Xte)
     rng = np.random.default_rng(seed)
@@ -479,14 +568,19 @@ def main() -> None:
 
     def report(rows):
         for r in rows:
+            # `ece` is absent for the headline arm: a regressor has no posterior to calibrate.
             print(f"  {r['split']:<42} n={r['n']:<5} macroF1={r['macro_f1']:.3f}  "
-                  f"balAcc={r['balanced_accuracy']:.3f}  ECE={r['ece']:.3f}  "
-                  f"P@25={r['precision_at_25']:.3f}  linF1={r['macro_f1_linear']:.3f}")
+                  f"balAcc={r['balanced_accuracy']:.3f}  ECE={r.get('ece', float('nan')):.3f}  "
+                  f"P@25={r['precision_at_25']:.3f}  rho={r['spearman']:+.3f}  "
+                  f"linF1={r['macro_f1_linear']:.3f}")
             print(f"  {'':<42} baselines F1: majority {r['baseline_majority_f1']:.3f} / "
                   f"persistence {r['baseline_persistence_f1']:.3f} / "
                   f"climatology {r['baseline_climatology_f1']:.3f}   "
                   f"P@25: persistence {r['baseline_persistence_p25']:.3f} / "
                   f"climatology {r['baseline_climatology_p25']:.3f}")
+            print(f"  {'':<42} rho: persistence {r['baseline_persistence_spearman']:+.3f} / "
+                  f"climatology {r['baseline_climatology_spearman']:+.3f} / "
+                  f"linear {r['spearman_linear']:+.3f}")
 
     print("\n=== Spatially blocked (leave-one-cluster-out) ===")
     oof: list = []
@@ -519,34 +613,58 @@ def main() -> None:
     # Final artifact: fitted on everything, since the estimates above already tell us what it is worth.
     print("\nFitting final model on all data ...")
     y_all = df.label.to_numpy()
-    final = make_model().fit(df[MODEL_FEATURES], y_all)
-    holdout = df[df.cluster == sorted(df.cluster.unique())[-1]]
-    held_risk = expected_severity(final.predict_proba(holdout[MODEL_FEATURES]))
+    z_all = df.forward_z.to_numpy(dtype=float)
+    ok = np.isfinite(z_all)
+    final = make_regressor().fit(df[MODEL_FEATURES][ok], z_all[ok])
+    holdout = df[df.cluster == max(df.cluster.unique())]
+    held_risk = -final.predict(holdout[MODEL_FEATURES])
     print("(in-sample for the held-out cluster — the blocked numbers above are the honest ones)")
     print(classification_report(holdout.label, decide(held_risk, y_all), zero_division=0, digits=3))
 
-    artifact = artifact_path(MODEL_FEATURES)
+    artifact = artifact_path(MODEL_FEATURES, experimental=args.no_radar)
     artifact.parent.mkdir(parents=True, exist_ok=True)
     if artifact != PRODUCTION_ARTIFACT:
-        print(f"\n!! {len(set(MODEL_FEATURES) - set(FEATURE_COLUMNS))} features are not buildable by "
-              f"serving/pipeline.py; writing to {artifact} instead of the production path.")
-        print("   To promote: teach the serving path to build the cluster-relative twins.")
+        unbuildable = sorted(set(MODEL_FEATURES) - SERVABLE_FEATURES)
+        reason = (f"{len(unbuildable)} features are not buildable by serving/pipeline.py: "
+                  f"{unbuildable}" if unbuildable else
+                  "this is an ablation, not the production feature set")
+        print(f"\n!! {reason}; writing to {artifact} instead of the production path.")
     # Metrics live beside their artifact, or an experimental run silently overwrites the record of
     # what production is actually doing.
     metrics_path = artifact.with_name("metrics.json" if artifact == PRODUCTION_ARTIFACT
                                       else artifact.stem + "_metrics.json")
-    version = f"agro-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
+    version = f"agro-{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
     joblib.dump({
         "model": final,
         "version": version,
         "feature_columns": MODEL_FEATURES,
-        # The serving path must reproduce these before calling the model: the cluster-relative
-        # twins are computed against the field's own cluster statistics, not stored per row.
+        # The serving path reproduces the twins before calling the model. It needs both halves:
+        # which cluster a field falls in (`cluster_bounds`) and the (mu, sigma) that cluster's
+        # columns were standardised against here (`cluster_stats`). Recomputing sigma from serving
+        # traffic instead would feed the model a differently-scaled feature under the same name.
         "cluster_relative": CLUSTER_RELATIVE,
+        "cluster_stats": cluster_stats(df),
+        # The (cluster, month) reference `ndvi_z_peer` and `rvi_z_peer` are standardised against.
+        # Serving cannot compute it — it holds one row — so it must be carried.
+        #
+        # Pooled over the whole frame, not per evaluation fold, for the reason
+        # `add_cluster_relative` already gives about its own twins: this is a label-free transform,
+        # so a held-out cluster standardising against itself is not leakage. It also matches what
+        # deployment does — the artifact ships `cluster_bounds` for every trained cluster, so a live
+        # field lands in a *known* district and gets a real reference. Computing it per fold instead
+        # would leave a held-out cluster with no bucket, which blinds `baseline_persistence` and
+        # `baseline_climatology` (both read `ndvi_z_peer`) while the model keeps 39 other features —
+        # a bigger distortion than the transduction it avoids.
+        "peer_stats": peer_stats(df),
+        "cluster_bounds": {c["name"]: {"lat": list(c["lat"]), "lon": list(c["lon"])}
+                           for c in CLUSTERS},
         "classes": [0, 1, 2],
         "label": "peer-standardised NDVI anomaly 30 days ahead",
+        # The serving contract. `label` above is prose for a human; this is the machine-checked
+        # key that stops a classifier artifact being read as a regressor. See registry.py.
+        "target": "forward_z",
         "thresholds": {"severe_z": SEVERE_Z, "elevated_z": ELEVATED_Z},
-        "n_samples": int(len(df)),
+        "n_samples": len(df),
         "trained_on": f"{df.obs_date.min()}..{df.obs_date.max()}",
     }, artifact)
 
@@ -556,7 +674,7 @@ def main() -> None:
         "decision_rule_sweep": sweep,
         "permutation_importance": importance,
         "model_features": MODEL_FEATURES,
-        "n_samples": int(len(df)),
+        "n_samples": len(df),
         "class_balance": df.label.value_counts(normalize=True).sort_index().round(4).to_dict(),
     }, indent=2, default=str))
     print(f"Saved {artifact} ({version}) and {metrics_path}")

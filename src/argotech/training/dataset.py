@@ -45,6 +45,12 @@ from argotech.features.agronomic import (
     FEATURE_COLUMNS,
     WINDOW_DAYS,
     build,
+    finite,
+    nearest_sar,
+    peer_bucket,
+    peer_reference,
+    peer_stats,
+    peer_z,
     radar_block,
     satellite_block,
 )
@@ -62,6 +68,12 @@ CLUSTERS = [
 
 LABEL_HORIZON_INTERVALS = 1     # one P30D bucket ahead
 SEVERE_Z, ELEVATED_Z = -1.0, -0.35
+
+# `SentinelClient._stats` omits an interval with no valid statistics, so "the next bucket" is the
+# next *cloud-free* one, not the next 30 days. Measured over the cached histories, 7% of samples
+# were 60-240 days ahead and pooled into a target everything downstream calls a 30-day forecast.
+# 45 days admits the normal 30-day bucket (and its few days of aggregation slack) and nothing else.
+MAX_LABEL_GAP_DAYS = 45
 
 CACHE_DIR = Path(".cache/sentinel")
 SAR_CACHE_DIR = Path(".cache/sentinel_sar")
@@ -150,42 +162,6 @@ def bands_history(site: dict, days: int) -> list[dict]:
     )
 
 
-def _finite(value) -> bool:
-    """True for a real, usable measurement.
-
-    Cached upstream responses predate the current filtering and can still contain JSON `NaN`, and a
-    NaN peer silently poisons a whole cohort's mean and standard deviation — every z-score computed
-    against it becomes NaN. On Python 3.12 `statistics.pstdev` additionally *raises* on such a list
-    ("'float' object has no attribute 'numerator'"), so the same defect is a crash on one interpreter
-    and silent corruption on another. Filtering at cohort-construction time fixes both.
-    """
-    return isinstance(value, (int, float)) and value == value and value not in (float("inf"), float("-inf"))
-
-
-def nearest_sar(sar: list[dict], target: str, max_gap_days: int = 20) -> dict | None:
-    """The radar observation closest in time to an optical sensing date, or None.
-
-    Sentinel-1 and Sentinel-2 do not share an orbit, so their P30D aggregation windows close on
-    different days. Pairing by nearest date within a tolerance is the join; requiring an exact match
-    would discard almost everything.
-
-    `max_gap_days` is deliberately under the 30-day aggregation interval: a radar window centred
-    more than 20 days from the optical one describes a different point in the crop cycle.
-    """
-    if not sar:
-        return None
-    t = date.fromisoformat(target)
-    best, best_gap = None, max_gap_days + 1
-    for obs in sar:
-        try:
-            gap = abs((date.fromisoformat(obs["sensing_date"]) - t).days)
-        except ValueError:
-            continue
-        if gap < best_gap:
-            best, best_gap = obs, gap
-    return best
-
-
 def collect_site(site: dict, years: int) -> dict | None:
     """Fetch both upstreams for one site. Returns None when either is unusable."""
     days = years * 365
@@ -197,10 +173,17 @@ def collect_site(site: dict, years: int) -> dict | None:
     if not payload or len(history) < 6:
         return None
 
+    daily = meteo.daily_frame(payload)
+    # A variable missing from the whole response is an upstream failure, not a weather condition.
+    # Every feature derived from it would be a confident fabrication; drop the site instead.
+    if not meteo.has_all_variables(daily):
+        print(f"[dataset] {site['site_id']}: incomplete ERA5 variables, site dropped")
+        return None
+
     return {
         **site,
         "elevation": payload.get("elevation", 0.0),
-        "daily": meteo.daily_frame(payload),
+        "daily": daily,
         "history": history,
         # Radar is additive, never a gate: a site with no S1 coverage still yields samples, with the
         # SAR block absent. Gating on it would shrink the dataset to buy a feature.
@@ -223,22 +206,15 @@ def _climatological_rain_30(daily: dict, end_idx: int, exclude_year: str) -> flo
 
 def build_samples(sites: list[dict]) -> pd.DataFrame:
     """Cross-join sites with their satellite observation dates, and label each from t+30."""
-    # Cohort NDVI per (cluster, sensing_date) for the cross-sectional peer z-score.
+    # Cohort NDVI per (cluster, sensing_date) — the concurrent cross-site cohort, kept for the
+    # *label* only. `forward_z` is never computed at serving, so it carries no train/serve skew and
+    # its concurrent construction is what makes it a peer-relative target worth predicting. The
+    # feature-side peer anomaly is standardised in the second pass instead; see `peer_stats`.
     cohort: dict[tuple[str, str], list[float]] = {}
     for s in sites:
         for obs in s["history"]:
-            if _finite(obs.get("ndvi")):
+            if finite(obs.get("ndvi")):
                 cohort.setdefault((s["cluster"], obs["sensing_date"]), []).append(obs["ndvi"])
-
-    # The radar peer cohort is keyed on the *optical* date each SAR observation was matched to, so
-    # `rvi_z_peer` compares fields at the same point in the season rather than at whatever date
-    # Sentinel-1's own orbit happened to close an interval on.
-    sar_cohort: dict[tuple[str, str], list[float]] = {}
-    for s in sites:
-        for obs in s["history"]:
-            matched = nearest_sar(s.get("sar", []), obs["sensing_date"])
-            if matched and _finite(matched.get("rvi")):
-                sar_cohort.setdefault((s["cluster"], obs["sensing_date"]), []).append(matched["rvi"])
 
     rows = []
     for s in sites:
@@ -252,20 +228,36 @@ def build_samples(sites: list[dict]) -> pd.DataFrame:
                 continue
             label_obs = future[0]
 
+            # The horizon has to *be* 30 days. A cloudy month is skipped by the upstream, so the
+            # next bucket can sit 60-240 days out; those are a different forecasting problem, not a
+            # noisier version of this one.
+            gap = (date.fromisoformat(label_obs["sensing_date"])
+                   - date.fromisoformat(obs["sensing_date"])).days
+            if gap > MAX_LABEL_GAP_DAYS:
+                continue
+
+            # `satellite_block` does no filtering of its own, so a NaN observation reaches the row
+            # as NaN ndvi/ndmi/evi/ndvi_z_peer. The cohort above already excludes it, so this sample
+            # has no canopy state at all — there is nothing left for it to teach.
+            if not finite(obs.get("ndvi")):
+                continue
+
             # Align the satellite date onto the weather series; require a full look-back window.
             end_idx = time_index.get(obs["sensing_date"])
             if end_idx is None or end_idx < WINDOW_DAYS:
                 continue
 
             window = {k2: v[end_idx - WINDOW_DAYS:end_idx] for k2, v in s["daily"].items()}
-            peers_now = [v for v in cohort.get((s["cluster"], obs["sensing_date"]), []) if v != obs["ndvi"]]
-            past_ndvi = [o["ndvi"] for o in history[:k] if _finite(o.get("ndvi"))]
+            past_ndvi = [o["ndvi"] for o in history[:k] if finite(o.get("ndvi"))]
 
             matched_sar = nearest_sar(s.get("sar", []), obs["sensing_date"])
-            sar_peers = [v for v in sar_cohort.get((s["cluster"], obs["sensing_date"]), [])
-                         if not (matched_sar and v == matched_sar["rvi"])]
-            sat = {**satellite_block(obs, past_ndvi, peers_now),
-                   **radar_block(matched_sar, sar_peers)}
+            # The peer reference is not known yet: it is the (cluster, month) statistic over the
+            # rows this loop is still building, and it must be computed over exactly the sample set
+            # `train.py` will snapshot into the artifact. Passing None leaves both `_z_peer` columns
+            # NaN; the second pass below fills them. Computing a reference here from a different
+            # population is how one column came to mean two things in the first place.
+            sat = {**satellite_block(obs, past_ndvi, None),
+                   **radar_block(matched_sar, None)}
             site_ctx = {
                 "latitude": s["latitude"], "longitude": s["longitude"], "elevation": s["elevation"],
                 "clim_rain_30": _climatological_rain_30(s["daily"], end_idx, obs["sensing_date"][:4]),
@@ -282,15 +274,35 @@ def build_samples(sites: list[dict]) -> pd.DataFrame:
             if sd < 1e-6:
                 continue
             z = (label_obs["ndvi"] - mean) / sd
+            # `NaN <= SEVERE_Z` is False and so is `NaN <= ELEVATED_Z`, which would label an
+            # *unobserved* outcome "healthy". An absent label is not a class.
+            if not finite(z):
+                continue
             row["label"] = 2 if z <= SEVERE_Z else (1 if z <= ELEVATED_Z else 0)
 
             row["forward_z"] = round(z, 4)
             row["site_id"] = s["site_id"]
             row["cluster"] = s["cluster"]
             row["obs_date"] = obs["sensing_date"]
+            # The date the label was actually observed, so the horizon guard above is auditable and
+            # a temporal split can be honest about when each outcome became known.
+            row["label_date"] = label_obs["sensing_date"]
             rows.append(row)
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    # ---- second pass: the peer anomaly, against one reference both paths share ----------------
+    # `peer_stats` over these rows is exactly what `train.py` snapshots into the artifact, so the
+    # features here and the features serving builds are standardised against identical constants.
+    stats = peer_stats(df)
+    for column, out in (("ndvi", "ndvi_z_peer"), ("rvi", "rvi_z_peer")):
+        df[out] = [
+            peer_z(value, peer_reference(stats, peer_bucket(cluster, obs_date), column))
+            for value, cluster, obs_date in zip(df[column], df.cluster, df.obs_date, strict=True)
+        ]
+    return df
 
 
 def build_dataset(per_cluster: int = 30, years: int = 4, workers: int = 3) -> pd.DataFrame:

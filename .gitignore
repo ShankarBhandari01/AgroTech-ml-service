@@ -1,7 +1,10 @@
 venv/
+# PyCharm's SDK for this project is registered at .venv/bin/python; a symlink to venv/ makes it resolve.
+.venv
 __pycache__/
 *.pyc
 .env
+.env.env.bak
 # macOS finder metadata — noise in every diff, never wanted in a commit.
 .DS_Store
 **/.DS_Store
@@ -18,7 +21,20 @@ mlflow.db
 
 # Cached upstream responses and built datasets.
 .cache/
-/data/
+# `/data/*` and not `/data/`: git never descends into an excluded directory, so a re-include
+# below it can never match. Excluding the contents instead leaves the negation reachable.
+/data/*
+
+# ...except the training set, which is tracked deliberately. It is the input every artifact was
+# fitted on, so an untracked copy makes a model unreproducible the moment the builder's upstreams
+# move — and Open-Meteo's archive is rate-limited, so "just rebuild it" is not always available.
+# A rebuild on a quota-exhausted day silently resolved 127 of 192 sites and overwrote the 185-site
+# set with a third fewer samples; nothing could restore it. 468 KB, and it changes only on retrain.
+!/data/training_set.parquet
+
+# The Presto embeddings stay ignored: 4.6 MB each, reproducible from .cache/, and the encoder was
+# evaluated and rejected (see artifacts/experimental/). Tracking them would cost 14 MB for a
+# negative result.
 
 # Editor/hook scratch files.
 .claude/*.tmp.*

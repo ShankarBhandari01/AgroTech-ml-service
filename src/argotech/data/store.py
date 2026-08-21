@@ -23,9 +23,9 @@ model artifact (`feature_columns`), so the ordering is enforced at load time whe
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from math import isfinite
-from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -92,16 +92,16 @@ def ensure_schema(db: Session) -> None:
     db.commit()
 
 
-def is_fresh(computed_at: Optional[datetime], now: Optional[datetime] = None,
+def is_fresh(computed_at: datetime | None, now: datetime | None = None,
              max_age: timedelta = MAX_FEATURE_AGE) -> bool:
     """Whether a precomputed row may be served. Naive timestamps are assumed UTC."""
     if computed_at is None:
         return False
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     if computed_at.tzinfo is None:
-        computed_at = computed_at.replace(tzinfo=timezone.utc)
+        computed_at = computed_at.replace(tzinfo=UTC)
     if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
+        now = now.replace(tzinfo=UTC)
     return timedelta(0) <= now - computed_at <= max_age
 
 
@@ -146,7 +146,7 @@ def write_features(db: Session, field_id: str, lat: float, lon: float, crop: str
     db.commit()
 
 
-def read_latest_features(db: Session, field_id: str) -> Optional[dict]:
+def read_latest_features(db: Session, field_id: str) -> dict | None:
     """Most recent precomputed row for a field, or None if there is none or it is stale."""
     row = db.execute(text("""
         SELECT features, context, computed_at
@@ -171,7 +171,7 @@ def prune_features(db: Session, keep_days: int = 90) -> int:
 # ------------------------------------------------------------------ predictions
 
 def write_prediction(db: Session, field_id: str, model_version: str, feature_source: str,
-                     features: dict, assessment: Any, probabilities: Optional[dict]) -> Optional[int]:
+                     features: dict, assessment: Any, probabilities: dict | None) -> int | None:
     """Persist a prediction, returning its id so an outcome can be linked to it later.
 
     Never raises into the request path: losing the audit row is bad, failing the farmer's prediction
@@ -211,9 +211,9 @@ def write_prediction(db: Session, field_id: str, model_version: str, feature_sou
 # ------------------------------------------------------------------ outcomes
 
 def write_outcome(db: Session, field_id: str, observed_at: datetime, outcome_type: str,
-                  prediction_id: Optional[int] = None, stress_confirmed: Optional[bool] = None,
-                  diagnosis: Optional[str] = None, yield_t_ha: Optional[float] = None,
-                  notes: Optional[str] = None, reported_by: Optional[str] = None) -> int:
+                  prediction_id: int | None = None, stress_confirmed: bool | None = None,
+                  diagnosis: str | None = None, yield_t_ha: float | None = None,
+                  notes: str | None = None, reported_by: str | None = None) -> int:
     row = db.execute(text("""
         INSERT INTO field_outcomes (prediction_id, field_id, observed_at, outcome_type,
                                     stress_confirmed, diagnosis, yield_t_ha, notes, reported_by)

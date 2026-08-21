@@ -17,12 +17,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import time
 
 from sqlalchemy import text
 
 from argotech.data import store
 from argotech.data.db import SessionLocal
+from argotech.serving.container import model_manager
 from argotech.serving.pipeline import gather_upstream
 
 # Upstream courtesy: both APIs are free and rate-limited, and this job has all night. Sequential
@@ -61,11 +61,17 @@ async def run(limit: int | None = None, delay: float = DELAY_SECONDS) -> dict:
         fields = list_fields(db, limit)
         print(f"Precomputing features for {len(fields)} fields ...")
 
+        # The peer reference is a fitted statistic carried in the artifact, so the nightly job needs
+        # it too: a stored row whose `ndvi_z_peer` was standardised against anything else is the
+        # skew this replaced, written to the feature table instead of computed in a request.
+        _, _, _, bounds, _, peer_ref = model_manager.agronomic_model()
+
         ok = failed = 0
         degraded = 0     # succeeded, but with no cloud-free Sentinel-2 scene
         for i, f in enumerate(fields, 1):
             try:
-                row, ctx = await gather_upstream(f["latitude"], f["longitude"], f["crop"])
+                row, ctx = await gather_upstream(f["latitude"], f["longitude"], f["crop"],
+                                                 bounds, peer_ref)
                 store.write_features(db, f["field_id"], f["latitude"], f["longitude"],
                                      f["crop"], row, ctx)
                 ok += 1
@@ -76,7 +82,7 @@ async def run(limit: int | None = None, delay: float = DELAY_SECONDS) -> dict:
                 print(f"  [{i}/{len(fields)}] {f['field_id']}: {e}")
             if i % 50 == 0:
                 print(f"  {i}/{len(fields)} — ok {ok}, degraded {degraded}, failed {failed}")
-            time.sleep(delay)
+            await asyncio.sleep(delay)
 
         pruned = store.prune_features(db)
         # `degraded` is the quality metric worth alerting on: it is the share of the farmer base for

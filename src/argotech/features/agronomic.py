@@ -10,6 +10,9 @@ All computation delegates to `argotech.domain`, which is pure and separately tes
 
 from __future__ import annotations
 
+import math
+from datetime import date
+
 from argotech.domain import agronomy, indices
 
 # Length of the look-back window. 92 days is the Open-Meteo forecast endpoint's maximum look-back,
@@ -88,8 +91,13 @@ def add_cluster_relative(df, group: str = "cluster"):
 
     Standardisation uses only feature values — never the label — so a held-out cluster computing its
     own mean and standard deviation is not leakage. It is the point: the transform is what strips
-    cluster identity out of the inputs, and at serve time a new region normalises against its own
-    `field_features` rows the same way.
+    cluster identity out of the inputs.
+
+    `mu_c` and `sigma_c` are pooled over the whole frame per cluster — one pair per (cluster,
+    column), not per date. Serving must reuse *these* constants rather than recomputing from its own
+    rows: the model was fitted on twins measured against this reference distribution, and z-scores
+    against any other one are a different feature wearing the same name. `cluster_stats` snapshots
+    them into the artifact and `cluster_relative_row` replays them one row at a time.
 
     For feature x and cluster c:
 
@@ -119,6 +127,99 @@ def add_cluster_relative(df, group: str = "cluster"):
     return out
 
 
+# The raw columns whose peer anomaly is standardised. Their `_z_peer` outputs are model features;
+# `ndvi_z_peer` is also the entire input to the persistence hazard path.
+PEER_RELATIVE = ["ndvi", "rvi"]
+
+
+def peer_bucket(cluster: str | None, sensing_date: str) -> str | None:
+    """The reference bucket for one observation: `"<cluster>|<MM>"`, or None without a cluster.
+
+    Calendar month, not date: the cohort a field is compared against has to be knowable at serving
+    time, and a specific date's cohort is not. Month is the coarsest key that still separates the
+    growing season from the dry season, which is the variation that would otherwise dominate.
+    """
+    return f"{cluster}|{sensing_date[5:7]}" if cluster else None
+
+
+def peer_stats(df, group: str = "cluster") -> dict:
+    """`{"<cluster>|<MM>": {column: [mu, sigma]}}` — the reference both paths standardise against.
+
+    Snapshotted into the artifact so serving reproduces training's arithmetic from constants rather
+    than from whatever sample it happens to hold. Plain lists rather than a DataFrame: this crosses
+    a joblib boundary and then a `predict` hot path, and must not drag pandas into either.
+
+    Computed per fold during evaluation and over the full frame for the shipped artifact. Computing
+    it over the full frame during evaluation would standardise a held-out cluster against itself.
+    """
+    keys = df[group].astype(str) + "|" + df["obs_date"].str.slice(5, 7)
+    grouped = df.assign(_bucket=keys).groupby("_bucket")
+    mean, sd = grouped[PEER_RELATIVE].mean(), grouped[PEER_RELATIVE].std()
+    return {str(b): {col: [float(mean.at[b, col]), float(sd.at[b, col])] for col in PEER_RELATIVE}
+            for b in mean.index}
+
+
+def peer_reference(stats: dict | None, bucket: str | None, column: str) -> list[float] | None:
+    """One `[mu, sigma]`, or None when the bucket was never measured.
+
+    None rather than a default: `[0.0, 1.0]` would assert that an unmeasured region is exactly
+    average, which is the fabrication `cluster_relative_row` refuses for the same reason.
+    """
+    if stats is None or bucket is None:
+        return None
+    entry = (stats.get(bucket) or {}).get(column)
+    return entry if entry and math.isfinite(entry[0]) else None
+
+
+def cluster_stats(df, group: str = "cluster") -> dict:
+    """`{cluster: {column: [mu, sigma]}}` — the reference distribution `add_cluster_relative` used.
+
+    Snapshotted into the model artifact so the serving path can standardise a single row against
+    the same constants. Plain lists rather than a DataFrame: this crosses a joblib boundary and
+    then a `predict` hot path, and it must not drag pandas into either.
+    """
+    grouped = df.groupby(group)
+    mean, sd = grouped[CLUSTER_RELATIVE].mean(), grouped[CLUSTER_RELATIVE].std()
+    return {str(c): {col: [float(mean.at[c, col]), float(sd.at[c, col])] for col in CLUSTER_RELATIVE}
+            for c in mean.index}
+
+
+def cluster_relative_row(row: dict, stats: dict | None) -> dict:
+    """The `_cz` twins for one row, reproducing `add_cluster_relative`'s three-way split exactly.
+
+    `stats` is one cluster's `{column: [mu, sigma]}`, or None for a field outside every known
+    cluster. An unknown cluster yields NaN rather than 0.0 for every twin: 0.0 asserts "average for
+    its region", and inventing that for a region we have never measured is the same fabrication the
+    docstring above refuses to make for a cloud-obscured field. HistGradientBoosting splits on NaN
+    natively, so the model degrades to the raw features instead of being lied to.
+    """
+    out = {}
+    for col in CLUSTER_RELATIVE:
+        x, mu_sigma = row.get(col), (stats or {}).get(col)
+        if x is None or not math.isfinite(x) or mu_sigma is None or not math.isfinite(mu_sigma[0]):
+            out[col + CZ_SUFFIX] = float("nan")
+            continue
+        mu, sigma = mu_sigma
+        # sigma > 1e-9 mirrors the vectorised `.where(sd > 1e-9, 0.0)`; a NaN sigma (a cluster with
+        # fewer than two observations of this column) is not > 1e-9 and so lands on 0.0 the same way.
+        out[col + CZ_SUFFIX] = (x - mu) / sigma if math.isfinite(sigma) and sigma > 1e-9 else 0.0
+    return out
+
+
+def assign_cluster(latitude: float, longitude: float, bounds: dict | None) -> str | None:
+    """Which training cluster a field falls in, or None if it falls in none of them.
+
+    Bounding boxes rather than a nearest-centroid match, because the clusters are not a partition of
+    the continent — they are six sampled zones. Snapping a farm 800 km away to the nearest one would
+    standardise it against a region it has nothing in common with.
+    """
+    for name, box in (bounds or {}).items():
+        (lat0, lat1), (lon0, lon1) = box["lat"], box["lon"]
+        if lat0 <= latitude <= lat1 and lon0 <= longitude <= lon1:
+            return name
+    return None
+
+
 def _slice(daily: dict, days: int) -> dict:
     return {k: v[-days:] for k, v in daily.items() if k != "time"}
 
@@ -126,6 +227,42 @@ def _slice(daily: dict, days: int) -> dict:
 def _round_or_nan(value: float, digits: int) -> float:
     """`round` propagates NaN fine, but not None — and an absent radar block gives either."""
     return float("nan") if value is None or value != value else round(value, digits)
+
+
+def finite(value) -> bool:
+    """True for a real, usable measurement.
+
+    Cached upstream responses predate the current filtering and can still contain JSON `NaN`, and a
+    NaN peer silently poisons a whole cohort's mean and standard deviation — every z-score computed
+    against it becomes NaN. On Python 3.12 `statistics.pstdev` additionally *raises* on such a list
+    ("'float' object has no attribute 'numerator'"), so the same defect is a crash on one interpreter
+    and silent corruption on another. Filtering at cohort-construction time fixes both.
+    """
+    return isinstance(value, (int, float)) and value == value and value not in (float("inf"), float("-inf"))
+
+
+def nearest_sar(sar: list[dict], target: str, max_gap_days: int = 20) -> dict | None:
+    """The radar observation closest in time to an optical sensing date, or None.
+
+    Sentinel-1 and Sentinel-2 do not share an orbit, so their P30D aggregation windows close on
+    different days. Pairing by nearest date within a tolerance is the join; requiring an exact match
+    would discard almost everything.
+
+    `max_gap_days` is deliberately under the 30-day aggregation interval: a radar window centred
+    more than 20 days from the optical one describes a different point in the crop cycle.
+    """
+    if not sar:
+        return None
+    t = date.fromisoformat(target)
+    best, best_gap = None, max_gap_days + 1
+    for obs in sar:
+        try:
+            gap = abs((date.fromisoformat(obs["sensing_date"]) - t).days)
+        except ValueError:
+            continue
+        if gap < best_gap:
+            best, best_gap = obs, gap
+    return best
 
 
 def build(daily: dict, sat: dict, site: dict, crop: str = agronomy.DEFAULT_CROP) -> dict:
@@ -147,7 +284,7 @@ def build(daily: dict, sat: dict, site: dict, crop: str = agronomy.DEFAULT_CROP)
     tmax30, tmin30 = w30["temperature_2m_max"], w30["temperature_2m_min"]
     rain30, et030 = w30["precipitation_sum"], w30["et0_fao_evapotranspiration"]
 
-    gdd_daily = [agronomy.growing_degree_days(lo, hi) for lo, hi in zip(tmin90, tmax90)]
+    gdd_daily = [agronomy.growing_degree_days(lo, hi) for lo, hi in zip(tmin90, tmax90, strict=True)]
 
     # Phenology, anchored on the rainy-season onset within the window rather than assumed.
     onset = agronomy.season_onset_index(rain90)
@@ -200,24 +337,45 @@ def build(daily: dict, sat: dict, site: dict, crop: str = agronomy.DEFAULT_CROP)
     }
 
 
-def satellite_block(current: dict, past_ndvi: list[float], peer_ndvi: list[float]) -> dict:
-    """Canopy-state features. `past_ndvi` is this site's observations strictly *before* now (so VCI
-    carries no future information); `peer_ndvi` is the concurrent cohort, excluding this site."""
+def peer_z(value: float | None, peer_mu_sigma: list[float] | None) -> float:
+    """Standardise against the shared reference, or NaN when the bucket was never measured.
+
+    `sigma > 1e-9` mirrors `cluster_relative_row`'s constant-column rule, so the two mechanisms
+    cannot disagree about a degenerate reference.
+    """
+    if peer_mu_sigma is None or value is None or not math.isfinite(value):
+        return float("nan")
+    mu, sigma = peer_mu_sigma
+    if not math.isfinite(sigma) or sigma <= 1e-9:
+        return 0.0
+    return (value - mu) / sigma
+
+
+def satellite_block(current: dict, past_ndvi: list[float],
+                    peer_mu_sigma: list[float] | None) -> dict:
+    """Canopy-state features.
+
+    `past_ndvi` is this site's observations strictly *before* now, so VCI carries no future
+    information. `peer_mu_sigma` is the `[mu, sigma]` of the (cluster, calendar-month) reference
+    bucket — looked up by the caller from `peer_stats`, never computed here.
+
+    That argument used to be a peer *list*, and the two callers passed different lists: training the
+    concurrent cross-site cohort, serving the site's own 12-month history. One column name, two
+    meanings, correlated 0.626 with 25.5% sign flips. Taking the reference instead of the sample is
+    what makes the two callers incapable of disagreeing.
+    """
     ndvi = current["ndvi"]
     history = past_ndvi or [ndvi]
-    peer = peer_ndvi or [ndvi]
-    mean = sum(peer) / len(peer)
-    var = sum((p - mean) ** 2 for p in peer) / len(peer)
     return {
         "ndvi": ndvi,
         "ndmi": current["ndwi"],   # the repo's "ndwi" is the B08/B11 formula, i.e. NDMI
         "evi": current["evi"],
         "vci": indices.vci(ndvi, min(history), max(history)),
-        "ndvi_z_peer": indices.anomaly_z(ndvi, mean, var ** 0.5),
+        "ndvi_z_peer": peer_z(ndvi, peer_mu_sigma),
     }
 
 
-def radar_block(current: dict | None, peer_rvi: list[float]) -> dict:
+def radar_block(current: dict | None, peer_mu_sigma: list[float] | None) -> dict:
     """Canopy-structure features from Sentinel-1 backscatter.
 
         RVI      = 4 * VH / (VV + VH)      computed upstream in the evalscript
@@ -236,11 +394,8 @@ def radar_block(current: dict | None, peer_rvi: list[float]) -> dict:
         return {"rvi": float("nan"), "vh_vv_ratio": float("nan"), "rvi_z_peer": float("nan")}
 
     vv, vh, rvi = current["vv"], current["vh"], current["rvi"]
-    peer = peer_rvi or [rvi]
-    mean = sum(peer) / len(peer)
-    var = sum((p - mean) ** 2 for p in peer) / len(peer)
     return {
         "rvi": rvi,
         "vh_vv_ratio": (vh / vv) if vv else float("nan"),
-        "rvi_z_peer": indices.anomaly_z(rvi, mean, var ** 0.5),
+        "rvi_z_peer": peer_z(rvi, peer_mu_sigma),
     }

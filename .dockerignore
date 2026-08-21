@@ -11,6 +11,7 @@ __pycache__/
 .idea/
 .DS_Store
 .env
+.env.env.bak
 
 # Training-time state. The image only needs artifacts/agronomic_risk.joblib, which the Dockerfile
 # copies explicitly — do not exclude artifacts/.

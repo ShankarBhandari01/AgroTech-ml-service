@@ -19,8 +19,8 @@ composed by an arithmetic rule anyone can check.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
-
+import math
+from dataclasses import asdict, dataclass, field
 
 # Attributes that must never enter the vulnerability score. They are retained upstream for
 # *fairness auditing* — measuring whether the ranking disadvantages these groups — but a model that
@@ -30,6 +30,53 @@ PROTECTED_ATTRIBUTES = frozenset({"head_gender", "household_max_education", "rel
 
 def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
+
+
+# Mirrors `training.dataset.SEVERE_Z`, the anomaly at which the label calls a field severely
+# stressed. Restated rather than imported: serving must not depend on the training package. A test
+# pins the two together, so a change to one fails rather than drifting.
+SEVERE_ANOMALY_Z = -1.0
+
+# Logistic width. A hard ramp between the label's two cut points assigns exactly 0.0 to every field
+# above -0.35 — 68% of them — and ties are invisible to a ranking: measured leave-one-cluster-out
+# over all six clusters it costs 23% of the rank correlation (rho 0.351 -> 0.271). A smooth
+# strictly-monotone squash keeps the whole ordering inside the same [0, 1] the hazard API needs.
+ANOMALY_SOFTNESS = 0.5
+
+
+def vegetation_hazard_from_anomaly(peer_anomaly_z: float | None) -> float:
+    """Map a peer-standardised NDVI anomaly onto a vegetation hazard in [0, 1].
+
+        h = 1 / (1 + exp((z - SEVERE_ANOMALY_Z) / ANOMALY_SOFTNESS))
+
+    Centred on the severe cut, so h = 0.5 exactly at the threshold the label calls severe, rising
+    toward 1 as the field falls further behind its neighbours and toward 0 as it pulls ahead.
+
+    **This is the shared mapping for both hazard sources**, which is why the parameter is named for
+    the quantity and not for its origin. `serving/pipeline.py` selects the origin from
+    `VEGETATION_HAZARD_SOURCE`:
+
+    * `model` (the default) passes `forward_z` — the anomaly a `HistGradientBoostingRegressor`
+      *predicts* for 30 days ahead.
+    * `persistence` passes `ndvi_z_peer` — the field's own anomaly *observed today*, carried forward.
+
+    Identical centre and softness either way, so the two are directly comparable as rankings. From
+    `artifacts/metrics.json` (seed 42, leave-one-cluster-out, six folds): the model ranks at
+    Spearman rho 0.377 and P@25 0.760, persistence at 0.368 / 0.467, site climatology at
+    0.363 / 0.680. The model's case is P@25 — ahead of persistence in all six folds and of
+    climatology in four — not rho, where all three are within 0.014 of each other.
+
+    The magnitudes are *not* comparable, and no rank metric can see it: a regressor predicts a
+    conditional mean, so its output is compressed (predicted std 0.508 against an observed
+    `forward_z` std of 1.165), and the model path therefore returns systematically smaller hazards
+    than persistence would for the same field.
+
+    An absent anomaly yields 0.0 — no canopy evidence means no canopy hazard, and the physical
+    hazards carry the assessment, exactly as they do when no satellite scene is available at all.
+    """
+    if peer_anomaly_z is None or math.isnan(peer_anomaly_z):
+        return 0.0
+    return _clamp01(1.0 / (1.0 + math.exp((peer_anomaly_z - SEVERE_ANOMALY_Z) / ANOMALY_SOFTNESS)))
 
 
 def noisy_or(probabilities: list[float]) -> float:
@@ -68,10 +115,11 @@ def assess_hazard(water_satisfaction: float, dry_spell_days: int,
                   spray_threshold: int = 18) -> Hazard:
     """Map agronomic indicators onto hazard intensities in [0, 1].
 
-    `vegetation` is where the learned model plugs in: the trained classifier's expected severity for
-    forward canopy stress, entering as one more independent hazard rather than as a competing
-    overall score. Leave it at 0 to get the pure physics/epidemiology assessment — which is also the
-    baseline the learned component has to beat before it is worth including.
+    `vegetation` is where the canopy signal plugs in: `vegetation_hazard_from_anomaly` applied to a
+    peer anomaly that is either predicted 30 days out or observed today, depending on
+    `VEGETATION_HAZARD_SOURCE`. Either way it enters as one more independent hazard rather than as a
+    competing overall score. Leave it at 0 to get the pure physics/epidemiology assessment — which
+    is also the baseline the canopy component has to beat before it is worth including.
 
     The mappings are explicit and monotone by construction. They are *priors*, replaced component by
     component as outcome labels accumulate — see `docs/model-design.md`, phase 2.

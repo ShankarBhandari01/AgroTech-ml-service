@@ -1,5 +1,4 @@
 from datetime import datetime
-from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -8,9 +7,10 @@ class PredictionProbabilities(BaseModel):
     """Learned model output over the three forward-stress classes. All-zero above `low` when no
     cloud-free scene was available and the model did not contribute.
 
-    **These describe the vegetation hazard term only, not overall risk.** They are the calibrated
-    posterior for "will this field's canopy be stressed relative to its peers in 30 days" — one of
-    four hazards that feed the noisy-OR, alongside drought, disease and heat. `prediction` and
+    **These describe the vegetation hazard term only, not overall risk.** They are an encoding of a
+    single scalar hazard — "will this field's canopy be stressed relative to its peers in 30 days" —
+    not a fitted posterior; see `_severity_to_probabilities`. One of four hazards that feed the
+    noisy-OR, alongside drought, disease and heat. `prediction` and
     `risk_score_percent` come from the full Hazard x Exposure x Vulnerability composition, so they
     routinely disagree with the argmax here: a field can be 66% "low" on canopy stress and still be
     CRITICAL because accumulated blight severity crossed the spray threshold.
@@ -33,7 +33,7 @@ class InferenceDetail(BaseModel):
     risk_level: str
     dominant_hazard: str
     probability: float
-    primary_drivers: List[str]
+    primary_drivers: list[str]
     # False when no Sentinel-2 scene was available and the assessment rests on physics alone.
     model_contributed: bool = True
 
@@ -50,7 +50,7 @@ class HazardDetail(BaseModel):
 class VulnerabilityDetail(BaseModel):
     score: float
     coping_capacity: float
-    gaps: List[str]
+    gaps: list[str]
 
 
 class RiskAssessmentDetail(BaseModel):
@@ -77,7 +77,7 @@ class SpatiotemporalIndices(BaseModel):
     vci: float
     canopy_stress_status: str
     source: str = "modelled"
-    sensing_date: Optional[str] = None
+    sensing_date: str | None = None
 
 
 class MicroclimateMetrics(BaseModel):
@@ -95,29 +95,29 @@ class PredictionResponse(BaseModel):
     field_id: str
     # Handle for the audit row. Pass it back on POST /outcomes to link what happened to what was
     # predicted — this is the join that produces training labels.
-    prediction_id: Optional[int] = None
+    prediction_id: int | None = None
     model_version: str = "none"
     # "precomputed" when served from the nightly feature table, "live" when computed in-request.
     feature_source: str = "live"
-    features_computed_at: Optional[datetime] = None
+    features_computed_at: datetime | None = None
     crop_type: str
     phenology_stage: str
     prediction: int
     priority_label: str
     risk_score_percent: float
     probabilities: PredictionProbabilities = Field(
-        description="Calibrated posterior for the *vegetation hazard* term only. Do not read its "
-                    "argmax as the overall risk class — that is `prediction`.",
+        description="Encoding of the scalar *vegetation hazard* term only, not a fitted posterior. "
+                    "Do not read its argmax as the overall risk class — that is `prediction`.",
     )
     # Root-level, so an unknown-field-tolerant client ignores it safely. See PredictionProbabilities.
     probabilities_of: str = Field(
         default="vegetation hazard (peer-relative canopy stress, 30-day horizon)",
         description="What `probabilities` is over. NOT overall risk — that is `risk_score_percent`.",
     )
-    top_risk_factors: List[str]
+    top_risk_factors: list[str]
     inference: InferenceDetail
     risk_assessment: RiskAssessmentDetail
-    crop_health: Optional[CropHealthDetail] = None
+    crop_health: CropHealthDetail | None = None
     spatiotemporal_indices: SpatiotemporalIndices
     microclimate_metrics: MicroclimateMetrics
     recommended_action: str
