@@ -13,10 +13,11 @@ class Settings(BaseSettings):
     # observed value carried forward.
     #
     # Defaults to the model since 2026-08-21. The previous default was persistence because the
-    # *classifier* ranked worse than it: Spearman 0.196 against 0.351. Regressing `forward_z`
-    # instead lifts the model to 0.342 — level with persistence, improving in all 30 of 5 seeds x 6
-    # blocked folds — and P@25 to 0.741 against persistence's 0.51. The case for this default rests
-    # on P@25, not on rho, where the two are level.
+    # *classifier* ranked worse than it: Spearman 0.196 (mean rho over 5 seeds, leave-one-cluster-out)
+    # against persistence's 0.351. Regressing `forward_z` instead lifts the model to 0.342 (same
+    # protocol) — level with persistence, improving in all 30 of 5 seeds x 6 blocked folds — and
+    # P@25 to 0.741 against persistence's 0.51. The case for this default rests on P@25, not on rho,
+    # where the two are level.
     VEGETATION_HAZARD_SOURCE: str = "model"
     DATABASE_URL: str = "postgresql://postgres:password@localhost:5432/agrotech"
 

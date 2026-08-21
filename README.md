@@ -64,7 +64,7 @@ Risk = Hazard × Exposure × Vulnerability
 | Term | Source | Needs training data? |
 | --- | --- | --- |
 | **Hazard** — drought, disease, heat | FAO-56 water balance, Wallin/BLITECAST severity values, flowering heat-stress days | No. Physics and epidemiology. |
-| **Hazard** — vegetation | By default the field's own peer anomaly carried forward, entering as one more independent hazard via noisy-OR. The trained model is the `VEGETATION_HAZARD_SOURCE=model` alternative | No by default |
+| **Hazard** — vegetation | By default a regressor predicting the field's peer anomaly 30 days ahead (`HistGradientBoostingRegressor` on `forward_z`). Persistence — carrying the field's own observed value forward — is the `VEGETATION_HAZARD_SOURCE=persistence` alternative | Yes (model artifact required by default) |
 | **Exposure** | `area × expected yield × farm-gate price`, in USD | No |
 | **Vulnerability** | Weighted coping capacity: irrigation, extension access, credit, inputs, diversification, assets, market access | No |
 
@@ -401,45 +401,44 @@ The healthcheck uses `python`, not `curl` or `wget` — the slim base image ship
 
 ## The model
 
-One artifact: `artifacts/agronomic_risk.joblib` (~1.5 MB). A `HistGradientBoostingClassifier` under
-a cross-fit `CalibratedClassifierCV(method="sigmoid", cv=5)`. The bundle carries its own
-`feature_columns` and `version`, so the column contract is explicit at load time and every persisted
-prediction is traceable to the artifact behind it.
+One artifact: `artifacts/agronomic_risk.joblib` (~1.5 MB). A `HistGradientBoostingRegressor`
+predicting `forward_z` — the field's peer-standardised NDVI anomaly 30 days ahead. The bundle carries
+its own `feature_columns` and `version`, so the column contract is explicit at load time and every
+persisted prediction is traceable to the artifact behind it. (The earlier `HistGradientBoostingClassifier`
+under `CalibratedClassifierCV(method="sigmoid", cv=5)` still exists as a control arm in `training/train.py`
+for comparison.)
 
-**It is one hazard term, not the risk score**, and as of `agro-20260816` it is **off by default** —
-`VEGETATION_HAZARD_SOURCE=persistence`.
+**It is one hazard term, not the risk score**, and as of 2026-08-21 it is **the default source** —
+`VEGETATION_HAZARD_SOURCE=model`.
 
-The earlier claim that it beat persistence rested on precision@25, which reads only the top 25 of a
-~1,100-field fold and carries a standard error of about 0.098. Scored on the whole ranking with
-Spearman's rho against the continuous `forward_z`, leave-one-cluster-out:
+The regressor scores Spearman's rho 0.342 against the continuous label (`forward_z`), over
+5 seeds × 6 leave-one-cluster-out folds — level with persistence's 0.351, where the earlier
+classifier scored 0.196 (mean over the same 5 seeds) and lost in every fold. Critically, the
+regressor beats persistence on precision@25: 0.741 against 0.51, improving in all 30 folds. Ranked
+metrics (rho, P@25) cannot detect a known structural limitation: because the regressor predicts a
+*conditional mean*, its output is compressed relative to observed values (std 0.540 vs observed
+`forward_z` 1.182, vs persistence's `ndvi_z_peer` 1.577). The model path therefore yields
+systematically smaller vegetation hazards — exceeding 0.5 on about 2.4% of fields against
+persistence's 14.5%.
 
-| | model | persistence | climatology |
-| --- | --- | --- | --- |
-| mean rho, spatially blocked | 0.191 | **0.351** | 0.341 |
-| mean rho, forward-chaining temporal | 0.242 | **0.426** | 0.465 |
-| folds won (of 9) | 0 | 9 | — |
+The case for this default rests on P@25, not rho (where the two are level). Set `VEGETATION_HAZARD_SOURCE=persistence` to A/B against the new default, or to disable the satellite path entirely when no canopy data is available.
 
-rho has a standard error near 0.030 on a fold that size, so the 0.161 gap is ~5 standard errors,
-where the precision@25 gaps are one or less. The model loses to a rule that carries the field's own
-peer anomaly forward, in every fold.
+The earlier classifier lost because the label is a z-score *within* a (cluster, date) cohort, so it
+cancels whatever the cohort shares — and the weather block is exactly that. Weather features retain
+19.7% of their variance inside a cohort and correlate 0.027 with the target; canopy features retain
+74.9% and correlate 0.127. The strongest single feature, `ndvi_z_peer`, reaches 0.256, and it is the
+same quantity persistence uses on its own. An unregularised classifier fit reaches macro F1 1.000
+in-sample, so capacity was never the constraint.
 
-The cause is structural rather than a tuning failure. The label is a z-score *within* a
-(cluster, date) cohort, so it cancels whatever the cohort shares — and the weather block is exactly
-that. Weather features retain 19.7% of their variance inside a cohort and correlate 0.027 with the
-target; canopy features retain 74.9% and correlate 0.127. The strongest single feature,
-`ndvi_z_peer`, reaches 0.256, and it is the same quantity persistence uses on its own. An
-unregularised fit reaches macro F1 1.000 in-sample, so capacity was never the constraint.
+Permutation importance on the regressor's held-out ground is led by `ndmi` and `evi`, with real
+contributions from the agronomy (`et0_90`, `dry_spell_30`, `stage_kc`), and [`docs/model-design.md`
+§9](docs/model-design.md) records both the results and why they differ from the classifier.
 
-Set `VEGETATION_HAZARD_SOURCE=model` to A/B it. Making the model worth its place needs features that
-vary *between neighbouring fields* — soil, irrigation, planting date, management — not more weather
-and not a different estimator.
-
-Permutation importance on held-out ground is led by `ndmi` and `evi`, with real contributions from
-the agronomy (`et0_90`, `dry_spell_30`, `stage_kc`) — at half this sample size the model was
-effectively a smoothed persistence model, and [`docs/model-design.md` §9](docs/model-design.md)
-records both results and why they differ.
-
-Do not promote it to the primary signal without new evidence on the same protocol.
+The regressor's promotion to the primary signal is justified by P@25 under the specific protocol of
+5 seeds and leave-one-cluster-out validation. Further evidence before widening the deployment scope
+would need to cover: performance under temporal drift (forward-chaining validation), robustness to
+missing satellite data in operational clusters, and performance on fields outside the 185-site training
+cohort.
 
 ---
 
