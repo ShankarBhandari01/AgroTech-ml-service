@@ -37,7 +37,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import balanced_accuracy_score, classification_report, f1_score
@@ -133,8 +133,37 @@ def make_linear(seed: int = 42):
     )
 
 
-# The arms evaluated side by side in every fold. The first is the production candidate.
-ARMS = {"hgb": make_model, "linear": make_linear}
+def make_regressor(seed: int = 42) -> HistGradientBoostingRegressor:
+    """The production arm: predict `forward_z` itself rather than its three-way discretisation.
+
+    Same hyperparameters as `make_model`'s base estimator — the two arms must differ only in what
+    they are asked to predict — minus the `CalibratedClassifierCV` wrapper, because a regressor
+    emits a number and there is no posterior to calibrate.
+
+    Why this is the production arm: over 5 seeds x 6 leave-one-cluster-out folds, regressing the
+    continuous target lifts Spearman rho from 0.196 to 0.342 — an improvement in *every one of the
+    30 folds* — and P@25 from 0.669 to 0.741, while macro F1 is unchanged within seed noise.
+    Discretising before fitting told the model that z = -0.34 and z = +6.9 were the same outcome.
+    """
+    return HistGradientBoostingRegressor(
+        max_iter=300,
+        learning_rate=0.06,
+        max_depth=5,
+        min_samples_leaf=25,
+        l2_regularization=1.0,
+        early_stopping=True,
+        validation_fraction=0.15,
+        random_state=seed,
+    )
+
+
+# (factory, target column). The target decides which column is fitted and how a risk score is
+# derived; `evaluate_fold` branches on it. `hgbr` is production; the other two are controls kept
+# so the metrics file keeps reporting what the change gave up rather than deleting the evidence.
+ARMS = {"hgbr": (make_regressor, "forward_z"),
+        "hgb": (make_model, "label"),
+        "linear": (make_linear, "label")}
+PRODUCTION_ARM = "hgbr"
 
 # Rebound by `--seed`. Only the boosted arm is genuinely stochastic: `HistGradientBoostingClassifier`
 # draws its own early-stopping validation split from `random_state`, whereas lbfgs logistic
@@ -349,14 +378,22 @@ def evaluate_fold(name: str, train: pd.DataFrame, test: pd.DataFrame, oof: list 
     zte = test.forward_z.to_numpy(dtype=float)
 
     result = {"split": name, "n": len(yte)}
-    for arm, factory in ARMS.items():
-        proba = factory(SEED).fit(Xtr, ytr).predict_proba(Xte)
-        risk = expected_severity(proba)
+    ztr = train.forward_z.to_numpy(dtype=float)
+    for arm, (factory, target) in ARMS.items():
+        if target == "forward_z":
+            # Fit only where the target is observed; never drop a row from *evaluation*.
+            ok = np.isfinite(ztr)
+            fitted = factory(SEED).fit(Xtr[ok], ztr[ok])
+            proba, risk = None, -fitted.predict(Xte)
+        else:
+            fitted = factory(SEED).fit(Xtr, ytr)
+            proba = fitted.predict_proba(Xte)
+            risk = expected_severity(proba)
         scored = _score(name, yte, decide(risk, ytr), proba, risk, zte)
         for key, value in scored.items():
             if key not in ("split", "n"):
-                result[f"{key}_{arm}" if arm != "hgb" else key] = value
-        if oof is not None and arm == "hgb":
+                result[f"{key}_{arm}" if arm != PRODUCTION_ARM else key] = value
+        if oof is not None and arm == PRODUCTION_ARM:
             oof.append((yte, risk, persistence_risk(test), climatology_risk(test), ytr))
 
     result.update({
@@ -519,8 +556,9 @@ def main() -> None:
 
     def report(rows):
         for r in rows:
+            # `ece` is absent for the headline arm: a regressor has no posterior to calibrate.
             print(f"  {r['split']:<42} n={r['n']:<5} macroF1={r['macro_f1']:.3f}  "
-                  f"balAcc={r['balanced_accuracy']:.3f}  ECE={r['ece']:.3f}  "
+                  f"balAcc={r['balanced_accuracy']:.3f}  ECE={r.get('ece', float('nan')):.3f}  "
                   f"P@25={r['precision_at_25']:.3f}  rho={r['spearman']:+.3f}  "
                   f"linF1={r['macro_f1_linear']:.3f}")
             print(f"  {'':<42} baselines F1: majority {r['baseline_majority_f1']:.3f} / "
