@@ -21,7 +21,15 @@ COPY artifacts/agronomic_risk.joblib artifacts/
 COPY src src
 RUN pip install --no-cache-dir --no-deps .
 
-RUN useradd --system --create-home ml
+# `meteo.CACHE_DIR` and `sentinel`'s caches are relative paths under the working directory, and the
+# service runs unprivileged — so /app/.cache has to exist and be writable before the drop, or every
+# upstream response is re-fetched and the failure surfaces only as a warning:
+#   [meteo] archive 11.900,8.500 failed: [Errno 13] Permission denied: '.cache'
+# That is silent in the response: the climatology falls back to the observed 30-day total, so
+# `rain_anomaly_30` reads exactly 0.0 — "perfectly normal rainfall" — for a field in deficit.
+RUN useradd --system --create-home ml \
+    && mkdir -p /app/.cache \
+    && chown -R ml:ml /app/.cache
 USER ml
 
 EXPOSE 8000
