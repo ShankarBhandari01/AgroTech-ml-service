@@ -147,8 +147,9 @@ def _vegetation_hazard_for(client, monkeypatch, z: float) -> float:
     from argotech.serving.container import model_manager
 
     monkeypatch.setattr(settings, "VEGETATION_HAZARD_SOURCE", "model")
-    _, columns, version, bounds, stats = model_manager.agronomic_model()
-    monkeypatch.setattr(model_manager, "_agronomic", (_FixedZ(z), columns, version, bounds, stats))
+    _, columns, version, bounds, stats, peer_ref = model_manager.agronomic_model()
+    monkeypatch.setattr(model_manager, "_agronomic",
+                        (_FixedZ(z), columns, version, bounds, stats, peer_ref))
     return _predict(client)["risk_assessment"]["hazard"]["vegetation"]
 
 
@@ -271,9 +272,9 @@ def test_every_feature_the_artifact_declares_is_actually_fed(monkeypatch):
     monkeypatch.setattr(sentinel_client, "fetch_sar_history", lambda *a, **k: sar)
 
     lat, lon = 10.8, 7.9
-    row, _ = asyncio.run(gather_upstream(lat, lon, "Maize"))
+    _, columns, _, bounds, stats, peer_ref = ModelManager().agronomic_model()
+    row, _ = asyncio.run(gather_upstream(lat, lon, "Maize", bounds, peer_ref))
 
-    _, columns, _, bounds, stats = ModelManager().agronomic_model()
     cluster = assign_cluster(lat, lon, bounds)
     row = {**row, **cluster_relative_row(row, stats.get(cluster))}
 

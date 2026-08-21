@@ -53,6 +53,7 @@ from argotech.features.agronomic import (
     UNINFORMATIVE,
     add_cluster_relative,
     cluster_stats,
+    peer_stats,
 )
 from argotech.training.dataset import CLUSTERS, ELEVATED_Z, SEVERE_Z
 
@@ -643,6 +644,18 @@ def main() -> None:
         # traffic instead would feed the model a differently-scaled feature under the same name.
         "cluster_relative": CLUSTER_RELATIVE,
         "cluster_stats": cluster_stats(df),
+        # The (cluster, month) reference `ndvi_z_peer` and `rvi_z_peer` are standardised against.
+        # Serving cannot compute it — it holds one row — so it must be carried.
+        #
+        # Pooled over the whole frame, not per evaluation fold, for the reason
+        # `add_cluster_relative` already gives about its own twins: this is a label-free transform,
+        # so a held-out cluster standardising against itself is not leakage. It also matches what
+        # deployment does — the artifact ships `cluster_bounds` for every trained cluster, so a live
+        # field lands in a *known* district and gets a real reference. Computing it per fold instead
+        # would leave a held-out cluster with no bucket, which blinds `baseline_persistence` and
+        # `baseline_climatology` (both read `ndvi_z_peer`) while the model keeps 39 other features —
+        # a bigger distortion than the transduction it avoids.
+        "peer_stats": peer_stats(df),
         "cluster_bounds": {c["name"]: {"lat": list(c["lat"]), "lon": list(c["lon"])}
                            for c in CLUSTERS},
         "classes": [0, 1, 2],

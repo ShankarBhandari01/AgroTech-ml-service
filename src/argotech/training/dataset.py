@@ -47,6 +47,10 @@ from argotech.features.agronomic import (
     build,
     finite,
     nearest_sar,
+    peer_bucket,
+    peer_reference,
+    peer_stats,
+    peer_z,
     radar_block,
     satellite_block,
 )
@@ -202,22 +206,15 @@ def _climatological_rain_30(daily: dict, end_idx: int, exclude_year: str) -> flo
 
 def build_samples(sites: list[dict]) -> pd.DataFrame:
     """Cross-join sites with their satellite observation dates, and label each from t+30."""
-    # Cohort NDVI per (cluster, sensing_date) for the cross-sectional peer z-score.
+    # Cohort NDVI per (cluster, sensing_date) — the concurrent cross-site cohort, kept for the
+    # *label* only. `forward_z` is never computed at serving, so it carries no train/serve skew and
+    # its concurrent construction is what makes it a peer-relative target worth predicting. The
+    # feature-side peer anomaly is standardised in the second pass instead; see `peer_stats`.
     cohort: dict[tuple[str, str], list[float]] = {}
     for s in sites:
         for obs in s["history"]:
             if finite(obs.get("ndvi")):
                 cohort.setdefault((s["cluster"], obs["sensing_date"]), []).append(obs["ndvi"])
-
-    # The radar peer cohort is keyed on the *optical* date each SAR observation was matched to, so
-    # `rvi_z_peer` compares fields at the same point in the season rather than at whatever date
-    # Sentinel-1's own orbit happened to close an interval on.
-    sar_cohort: dict[tuple[str, str], list[float]] = {}
-    for s in sites:
-        for obs in s["history"]:
-            matched = nearest_sar(s.get("sar", []), obs["sensing_date"])
-            if matched and finite(matched.get("rvi")):
-                sar_cohort.setdefault((s["cluster"], obs["sensing_date"]), []).append(matched["rvi"])
 
     rows = []
     for s in sites:
@@ -251,14 +248,16 @@ def build_samples(sites: list[dict]) -> pd.DataFrame:
                 continue
 
             window = {k2: v[end_idx - WINDOW_DAYS:end_idx] for k2, v in s["daily"].items()}
-            peers_now = [v for v in cohort.get((s["cluster"], obs["sensing_date"]), []) if v != obs["ndvi"]]
             past_ndvi = [o["ndvi"] for o in history[:k] if finite(o.get("ndvi"))]
 
             matched_sar = nearest_sar(s.get("sar", []), obs["sensing_date"])
-            sar_peers = [v for v in sar_cohort.get((s["cluster"], obs["sensing_date"]), [])
-                         if not (matched_sar and v == matched_sar["rvi"])]
-            sat = {**satellite_block(obs, past_ndvi, peers_now),
-                   **radar_block(matched_sar, sar_peers)}
+            # The peer reference is not known yet: it is the (cluster, month) statistic over the
+            # rows this loop is still building, and it must be computed over exactly the sample set
+            # `train.py` will snapshot into the artifact. Passing None leaves both `_z_peer` columns
+            # NaN; the second pass below fills them. Computing a reference here from a different
+            # population is how one column came to mean two things in the first place.
+            sat = {**satellite_block(obs, past_ndvi, None),
+                   **radar_block(matched_sar, None)}
             site_ctx = {
                 "latitude": s["latitude"], "longitude": s["longitude"], "elevation": s["elevation"],
                 "clim_rain_30": _climatological_rain_30(s["daily"], end_idx, obs["sensing_date"][:4]),
@@ -290,7 +289,20 @@ def build_samples(sites: list[dict]) -> pd.DataFrame:
             row["label_date"] = label_obs["sensing_date"]
             rows.append(row)
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    # ---- second pass: the peer anomaly, against one reference both paths share ----------------
+    # `peer_stats` over these rows is exactly what `train.py` snapshots into the artifact, so the
+    # features here and the features serving builds are standardised against identical constants.
+    stats = peer_stats(df)
+    for column, out in (("ndvi", "ndvi_z_peer"), ("rvi", "rvi_z_peer")):
+        df[out] = [
+            peer_z(value, peer_reference(stats, peer_bucket(cluster, obs_date), column))
+            for value, cluster, obs_date in zip(df[column], df.cluster, df.obs_date, strict=True)
+        ]
+    return df
 
 
 def build_dataset(per_cluster: int = 30, years: int = 4, workers: int = 3) -> pd.DataFrame:

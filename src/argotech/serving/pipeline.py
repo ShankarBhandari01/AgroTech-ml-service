@@ -33,8 +33,9 @@ from argotech.features.agronomic import (
     assign_cluster,
     build,
     cluster_relative_row,
-    finite,
     nearest_sar,
+    peer_bucket,
+    peer_reference,
     radar_block,
     satellite_block,
 )
@@ -121,7 +122,8 @@ def _leaf_wetness(lat: float, lon: float) -> list:
     return days
 
 
-async def gather_upstream(lat: float, lon: float, crop: str) -> tuple[dict, dict]:
+async def gather_upstream(lat: float, lon: float, crop: str,
+                          cluster_bounds: dict, peer_stats: dict) -> tuple[dict, dict]:
     """Every upstream call for one field, in one place: ERA5 daily, Sentinel-2 history, hourly leaf
     wetness, and the 4-year rainfall climatology.
 
@@ -155,8 +157,14 @@ async def gather_upstream(lat: float, lon: float, crop: str) -> tuple[dict, dict
         # the optical block above does — serving has no concurrent cross-site cohort, and inventing
         # a second convention for radar would be a skew of its own.
         matched_sar = nearest_sar(sar, latest["sensing_date"])
-        sat = {**satellite_block(latest, series[:-1], series[:-1]),
-               **radar_block(matched_sar, [o["rvi"] for o in sar[:-1] if finite(o.get("rvi"))])}
+        # The peer anomaly is standardised against the artifact's (cluster, month) reference — the
+        # same constants `dataset.py` built the training features with. Serving holds one row and
+        # cannot compute a cohort, and the previous substitution (this site's own 12-month history)
+        # made `ndvi_z_peer` a seasonal self-anomaly rather than a peer one: correlated 0.626 with
+        # the training column, 25.5% of fields flipping sign.
+        bucket = peer_bucket(assign_cluster(lat, lon, cluster_bounds), latest["sensing_date"])
+        sat = {**satellite_block(latest, series[:-1], peer_reference(peer_stats, bucket, "ndvi")),
+               **radar_block(matched_sar, peer_reference(peer_stats, bucket, "rvi"))}
         crop_health = indices.crop_health_index(
             current_ndvi=latest["ndvi"], ndmi_value=latest["ndwi"],
             ndvi_min=min(series), ndvi_max=max(series),
@@ -250,11 +258,17 @@ class PredictionsService:
         # Precomputed row when the nightly job has produced a fresh one, live upstream otherwise.
         # The fallback is deliberately kept: a new field registered this morning still gets a
         # prediction today, it just pays the latency once.
+        # Loaded regardless of VEGETATION_HAZARD_SOURCE: the peer reference is a *fitted* statistic,
+        # so both hazard sources depend on it. Persistence reads `ndvi_z_peer`, and that column is
+        # only meaningful against the reference the model was fitted with.
+        model, columns, artifact_version, bounds, stats, peer_ref = \
+            self.model_manager.agronomic_model()
+
         cached = store.read_latest_features(self.db, field_id) if self.db is not None else None
         if cached:
             row, ctx, feature_source = cached["features"], cached["context"], "precomputed"
         else:
-            row, ctx = await gather_upstream(lat, lon, crop)
+            row, ctx = await gather_upstream(lat, lon, crop, bounds, peer_ref)
             feature_source = "live"
 
         sat = ctx["sat"]
@@ -268,12 +282,12 @@ class PredictionsService:
         probabilities_of = PredictionResponse.model_fields["probabilities_of"].default
         if index_source == "sentinel-2":
             if settings.VEGETATION_HAZARD_SOURCE == "model":
-                model, columns, model_version, bounds, stats = self.model_manager.agronomic_model()
                 # Derived here rather than in `gather_upstream` so a `field_features` row stored by
                 # an older precompute run still gets its twins — arithmetic over the raw row and
                 # the artifact's snapshot, with no upstream call to pay for.
                 cluster = assign_cluster(lat, lon, bounds)
                 row = {**row, **cluster_relative_row(row, stats.get(cluster))}
+                model_version = artifact_version
                 zhat = await run_in_threadpool(model.predict, pd.DataFrame([row])[columns])
                 forecast_z = float(zhat[0])
                 logger.info("field=%s forecast_z=%+.3f from model %s (cluster %s)",

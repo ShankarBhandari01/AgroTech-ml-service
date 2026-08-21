@@ -48,9 +48,16 @@ class ModelManager:
                     "every field would silently report almost no canopy hazard. Retrain with "
                     "`python -m argotech.training.dataset` then `python -m argotech.training.train`."
                 )
+            if not bundle.get("peer_stats"):
+                raise ValueError(
+                    f"Artifact '{path}' carries no peer_stats; serving cannot standardise the peer "
+                    "anomaly without the reference the model was fitted against. Standardising "
+                    "against anything else is how `ndvi_z_peer` came to mean two different things. "
+                    "An artifact from before this contract must be retrained.")
             version = bundle.get("version") or f"n{bundle['n_samples']}@{bundle['trained_on']}"
             self._agronomic = (bundle["model"], bundle["feature_columns"], version,
-                               bundle.get("cluster_bounds") or {}, bundle.get("cluster_stats") or {})
+                               bundle.get("cluster_bounds") or {}, bundle.get("cluster_stats") or {},
+                               bundle["peer_stats"])
             logger.info("Loaded agronomic model %s from %s: %s on %s, %d features, %d clusters, "
                         "trained on %s", version, os.path.abspath(path),
                         type(bundle["model"]).__name__, target, len(bundle["feature_columns"]),

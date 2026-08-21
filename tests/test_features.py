@@ -127,11 +127,16 @@ def test_radar_block_is_nan_when_the_site_has_no_coverage():
 def test_radar_block_computes_the_ratio_and_peer_anomaly():
     from argotech.features.agronomic import radar_block
 
-    block = radar_block({"vv": 0.2, "vh": 0.05, "rvi": 0.8}, peer_rvi=[0.4, 0.4, 0.4])
+    block = radar_block({"vv": 0.2, "vh": 0.05, "rvi": 0.8}, [0.4, 0.2])
     assert block["rvi"] == 0.8
     assert abs(block["vh_vv_ratio"] - 0.25) < 1e-9
-    # Peers are constant at 0.4, so sd is 0 -> the anomaly must not be an infinity.
-    assert np.isfinite(block["rvi_z_peer"]) or block["rvi_z_peer"] != block["rvi_z_peer"]
+    # The peer argument is the (mu, sigma) of the shared reference bucket, not a sample: the caller
+    # looks it up, the block never computes it. (0.8 - 0.4) / 0.2 = 2.0.
+    assert abs(block["rvi_z_peer"] - 2.0) < 1e-9
+    # A constant reference carries no information, and 0.0 says so without becoming an infinity.
+    assert radar_block({"vv": 0.2, "vh": 0.05, "rvi": 0.8}, [0.4, 0.0])["rvi_z_peer"] == 0.0
+    # No bucket at all is a different statement from "average", and must stay NaN.
+    assert np.isnan(radar_block({"vv": 0.2, "vh": 0.05, "rvi": 0.8}, None)["rvi_z_peer"])
 
 
 def test_nearest_sar_pairs_within_tolerance_and_refuses_beyond_it():
