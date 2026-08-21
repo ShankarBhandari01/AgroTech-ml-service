@@ -27,13 +27,15 @@ Run: `python -m argotech.training.train`
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import joblib
 import numpy as np
 import pandas as pd
+from scipy.stats import spearmanr
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.impute import SimpleImputer
@@ -262,7 +264,7 @@ def expected_calibration_error(y_true: np.ndarray, proba: np.ndarray, bins: int 
     correct = (pred == y_true).astype(float)
     edges = np.linspace(0, 1, bins + 1)
     ece = 0.0
-    for lo, hi in zip(edges[:-1], edges[1:]):
+    for lo, hi in itertools.pairwise(edges):
         m = (conf > lo) & (conf <= hi)
         if m.sum():
             ece += m.mean() * abs(correct[m].mean() - conf[m].mean())
@@ -286,11 +288,34 @@ def precision_at_k(y_true: np.ndarray, risk: np.ndarray, k: int) -> float:
     return float((y_true[top] >= 1).mean())
 
 
+def rank_correlation(risk: np.ndarray, forward_z: np.ndarray) -> float:
+    """Spearman between the risk ranking and the actual canopy shortfall it is ordering.
+
+    P@25 asks one question at one cut point, and macro-F1 asks a classification question the product
+    never asks — the queue is a ranking, and `label` is a three-way discretisation of `forward_z`
+    thrown away before it is scored. This measures the ordering against the continuous target
+    directly, over every field rather than the top 25.
+
+        rho = Spearman( s_i , -z_i )
+
+    Negated because `forward_z` is a peer-standardised NDVI anomaly, so *low* is bad, while the risk
+    score s runs the other way. Positive rho therefore means correctly ordered. Scale-free and
+    monotone-invariant, so it is unaffected by how the risk score is calibrated — which is exactly
+    the property P@25 lacks.
+    """
+    ok = np.isfinite(risk) & np.isfinite(forward_z)
+    # Two distinct points cannot produce a rank correlation, and a constant arm yields NaN anyway.
+    if ok.sum() < 3:
+        return float("nan")
+    rho = spearmanr(risk[ok], -forward_z[ok])[0]
+    return round(float(rho), 4) if np.isfinite(rho) else float("nan")
+
+
 def _score(name: str, y_true: np.ndarray, y_pred: np.ndarray, proba: np.ndarray | None = None,
-           risk: np.ndarray | None = None) -> dict:
+           risk: np.ndarray | None = None, forward_z: np.ndarray | None = None) -> dict:
     out = {
         "split": name,
-        "n": int(len(y_true)),
+        "n": len(y_true),
         "macro_f1": round(float(f1_score(y_true, y_pred, average="macro", zero_division=0)), 4),
         "balanced_accuracy": round(float(balanced_accuracy_score(y_true, y_pred)), 4),
     }
@@ -299,6 +324,8 @@ def _score(name: str, y_true: np.ndarray, y_pred: np.ndarray, proba: np.ndarray 
     if risk is not None:
         for k in (10, 25, 50):
             out[f"precision_at_{k}"] = round(precision_at_k(y_true, risk, min(k, len(risk))), 4)
+        if forward_z is not None:
+            out["spearman"] = rank_correlation(risk, forward_z)
     return out
 
 
@@ -319,12 +346,13 @@ def evaluate_fold(name: str, train: pd.DataFrame, test: pd.DataFrame, oof: list 
     """
     ytr, yte = train.label.to_numpy(), test.label.to_numpy()
     Xtr, Xte = train[MODEL_FEATURES], test[MODEL_FEATURES]
+    zte = test.forward_z.to_numpy(dtype=float)
 
-    result = {"split": name, "n": int(len(yte))}
+    result = {"split": name, "n": len(yte)}
     for arm, factory in ARMS.items():
         proba = factory(SEED).fit(Xtr, ytr).predict_proba(Xte)
         risk = expected_severity(proba)
-        scored = _score(name, yte, decide(risk, ytr), proba, risk)
+        scored = _score(name, yte, decide(risk, ytr), proba, risk, zte)
         for key, value in scored.items():
             if key not in ("split", "n"):
                 result[f"{key}_{arm}" if arm != "hgb" else key] = value
@@ -337,6 +365,10 @@ def evaluate_fold(name: str, train: pd.DataFrame, test: pd.DataFrame, oof: list 
         "baseline_persistence_p25": round(precision_at_k(yte, persistence_risk(test), min(25, len(yte))), 4),
         "baseline_climatology_f1": _macro(yte, baseline_climatology(test)),
         "baseline_climatology_p25": round(precision_at_k(yte, climatology_risk(test), min(25, len(yte))), 4),
+        # The baselines are ranked by the same continuous target, so rho is the one number on which
+        # model and baseline are directly comparable without a decision rule in between.
+        "baseline_persistence_spearman": rank_correlation(persistence_risk(test), zte),
+        "baseline_climatology_spearman": rank_correlation(climatology_risk(test), zte),
     })
     return result
 
@@ -415,7 +447,7 @@ def permutation_importance_blocked(df: pd.DataFrame, seed: int = 0, repeats: int
     fitting, including columns that only helped it memorise. Permutation importance on unseen ground
     describes what actually carries transferable signal.
     """
-    cluster = sorted(df.cluster.unique())[-1]
+    cluster = max(df.cluster.unique())
     train, test = df[df.cluster != cluster], df[df.cluster == cluster]
     ytr = train.label.to_numpy()
     model = make_model().fit(train[MODEL_FEATURES], ytr)
@@ -489,12 +521,16 @@ def main() -> None:
         for r in rows:
             print(f"  {r['split']:<42} n={r['n']:<5} macroF1={r['macro_f1']:.3f}  "
                   f"balAcc={r['balanced_accuracy']:.3f}  ECE={r['ece']:.3f}  "
-                  f"P@25={r['precision_at_25']:.3f}  linF1={r['macro_f1_linear']:.3f}")
+                  f"P@25={r['precision_at_25']:.3f}  rho={r['spearman']:+.3f}  "
+                  f"linF1={r['macro_f1_linear']:.3f}")
             print(f"  {'':<42} baselines F1: majority {r['baseline_majority_f1']:.3f} / "
                   f"persistence {r['baseline_persistence_f1']:.3f} / "
                   f"climatology {r['baseline_climatology_f1']:.3f}   "
                   f"P@25: persistence {r['baseline_persistence_p25']:.3f} / "
                   f"climatology {r['baseline_climatology_p25']:.3f}")
+            print(f"  {'':<42} rho: persistence {r['baseline_persistence_spearman']:+.3f} / "
+                  f"climatology {r['baseline_climatology_spearman']:+.3f} / "
+                  f"linear {r['spearman_linear']:+.3f}")
 
     print("\n=== Spatially blocked (leave-one-cluster-out) ===")
     oof: list = []
@@ -528,7 +564,7 @@ def main() -> None:
     print("\nFitting final model on all data ...")
     y_all = df.label.to_numpy()
     final = make_model().fit(df[MODEL_FEATURES], y_all)
-    holdout = df[df.cluster == sorted(df.cluster.unique())[-1]]
+    holdout = df[df.cluster == max(df.cluster.unique())]
     held_risk = expected_severity(final.predict_proba(holdout[MODEL_FEATURES]))
     print("(in-sample for the held-out cluster — the blocked numbers above are the honest ones)")
     print(classification_report(holdout.label, decide(held_risk, y_all), zero_division=0, digits=3))
@@ -543,7 +579,7 @@ def main() -> None:
     # what production is actually doing.
     metrics_path = artifact.with_name("metrics.json" if artifact == PRODUCTION_ARTIFACT
                                       else artifact.stem + "_metrics.json")
-    version = f"agro-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
+    version = f"agro-{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
     joblib.dump({
         "model": final,
         "version": version,
@@ -559,7 +595,7 @@ def main() -> None:
         "classes": [0, 1, 2],
         "label": "peer-standardised NDVI anomaly 30 days ahead",
         "thresholds": {"severe_z": SEVERE_Z, "elevated_z": ELEVATED_Z},
-        "n_samples": int(len(df)),
+        "n_samples": len(df),
         "trained_on": f"{df.obs_date.min()}..{df.obs_date.max()}",
     }, artifact)
 
@@ -569,7 +605,7 @@ def main() -> None:
         "decision_rule_sweep": sweep,
         "permutation_importance": importance,
         "model_features": MODEL_FEATURES,
-        "n_samples": int(len(df)),
+        "n_samples": len(df),
         "class_balance": df.label.value_counts(normalize=True).sort_index().round(4).to_dict(),
     }, indent=2, default=str))
     print(f"Saved {artifact} ({version}) and {metrics_path}")

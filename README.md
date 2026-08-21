@@ -64,7 +64,7 @@ Risk = Hazard × Exposure × Vulnerability
 | Term | Source | Needs training data? |
 | --- | --- | --- |
 | **Hazard** — drought, disease, heat | FAO-56 water balance, Wallin/BLITECAST severity values, flowering heat-stress days | No. Physics and epidemiology. |
-| **Hazard** — vegetation | The trained model, entering as one more independent hazard via noisy-OR | Yes |
+| **Hazard** — vegetation | By default the field's own peer anomaly carried forward, entering as one more independent hazard via noisy-OR. The trained model is the `VEGETATION_HAZARD_SOURCE=model` alternative | No by default |
 | **Exposure** | `area × expected yield × farm-gate price`, in USD | No |
 | **Vulnerability** | Weighted coping capacity: irrigation, extension access, credit, inputs, diversification, assets, market access | No |
 
@@ -155,8 +155,11 @@ Base URL in production: `http://ml:8000` (compose-internal). No auth on any rout
 | `GET` | `/outcomes/label-count` | `?horizon_days=30` | How many prediction↔outcome pairs exist |
 | `GET` | `/docs`, `/openapi.json` | — | FastAPI defaults, not disabled |
 
-`model_name` / `model_alias` remain on the request schemas for backward compatibility with the
-Kotlin client and are ignored — there is one model now.
+`model_name` / `model_alias` are gone from the request schemas. They named an MLflow registry entry
+that no loader has read since the registry rewrite, and having them on the wire suggested a
+per-request model choice that does not exist. Pydantic ignores unknown fields, so a Kotlin client
+still sending them keeps working unchanged. What answered a given request is reported back in
+`model_version`; which source is configured service-wide is `VEGETATION_HAZARD_SOURCE`.
 
 ### Response — `PredictionResponse`
 
@@ -283,7 +286,8 @@ comes from the container environment or the default.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | `postgresql://postgres:password@localhost:5432/agrotech` | Reads the backend's farmer tables; owns `field_features`, `predictions`, `field_outcomes`. A `postgres://` prefix is rewritten |
-| `AGRONOMIC_MODEL_PATH` | `artifacts/agronomic_risk.joblib` | Model artifact, loaded by relative path from the working directory |
+| `AGRONOMIC_MODEL_PATH` | `artifacts/agronomic_risk.joblib` | Model artifact, loaded by relative path from the working directory. Only read when `VEGETATION_HAZARD_SOURCE=model` |
+| `VEGETATION_HAZARD_SOURCE` | `persistence` | Where the vegetation hazard comes from. `persistence` carries the field's own peer anomaly forward; `model` runs the trained classifier. See [The model](#the-model) |
 | `SENTINEL_CLIENT_ID` | `""` | CDSE OAuth client id. Blank disables the satellite path entirely |
 | `SENTINEL_CLIENT_SECRET` | `""` | CDSE OAuth client secret |
 | `SENTINEL_TOKEN_URL` | CDSE Keycloak token endpoint | Override for commercial Sentinel Hub |
@@ -294,9 +298,11 @@ Read from the environment directly, not through `Settings`:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | When set, adds a `BatchSpanProcessor` with an OTLP/HTTP exporter. Left unset in production so the exporter does not retry against a dead endpoint forever |
+| `LOG_LEVEL` | `INFO` | Root log level. `INFO` gives one arrival and one completion line per request (with status and latency), the parsed request body, a response summary, and which source answered the vegetation hazard |
 
 `USE_LOCAL_MODEL`, `MLFLOW_TRACKING_URI`, `MODEL_NAME` and `MODEL_ALIAS` are gone with the MLflow
-path. `extra="ignore"` means a compose file still setting them is harmless.
+path, and have now been dropped from `.env` as well — they had outlived the loader that read them by
+several commits. `extra="ignore"` means a compose file still setting them is harmless.
 
 Without Sentinel credentials the service still works: `crop_health` is null, `probabilities` collapse
 to `low: 1.0`, and the drought/disease/heat hazards carry the assessment on their own.
@@ -400,11 +406,33 @@ a cross-fit `CalibratedClassifierCV(method="sigmoid", cv=5)`. The bundle carries
 `feature_columns` and `version`, so the column contract is explicit at load time and every persisted
 prediction is traceable to the artifact behind it.
 
-**It is one hazard term, not the risk score.** Trained on 7,527 real samples across 185 sites and
-6 Sub-Saharan clusters. On spatially blocked evaluation it beats persistence on the operational
-ranking metric — mean precision@25 of 0.693 against 0.460, winning 5 of 6 held-out clusters — and is
-well calibrated (mean ECE 0.093). It still trails persistence on macro F1 (0.412 vs 0.450) and on
-temporal generalisation, so it contributes the vegetation hazard rather than the headline score.
+**It is one hazard term, not the risk score**, and as of `agro-20260816` it is **off by default** —
+`VEGETATION_HAZARD_SOURCE=persistence`.
+
+The earlier claim that it beat persistence rested on precision@25, which reads only the top 25 of a
+~1,100-field fold and carries a standard error of about 0.098. Scored on the whole ranking with
+Spearman's rho against the continuous `forward_z`, leave-one-cluster-out:
+
+| | model | persistence | climatology |
+| --- | --- | --- | --- |
+| mean rho, spatially blocked | 0.191 | **0.351** | 0.341 |
+| mean rho, forward-chaining temporal | 0.242 | **0.426** | 0.465 |
+| folds won (of 9) | 0 | 9 | — |
+
+rho has a standard error near 0.030 on a fold that size, so the 0.161 gap is ~5 standard errors,
+where the precision@25 gaps are one or less. The model loses to a rule that carries the field's own
+peer anomaly forward, in every fold.
+
+The cause is structural rather than a tuning failure. The label is a z-score *within* a
+(cluster, date) cohort, so it cancels whatever the cohort shares — and the weather block is exactly
+that. Weather features retain 19.7% of their variance inside a cohort and correlate 0.027 with the
+target; canopy features retain 74.9% and correlate 0.127. The strongest single feature,
+`ndvi_z_peer`, reaches 0.256, and it is the same quantity persistence uses on its own. An
+unregularised fit reaches macro F1 1.000 in-sample, so capacity was never the constraint.
+
+Set `VEGETATION_HAZARD_SOURCE=model` to A/B it. Making the model worth its place needs features that
+vary *between neighbouring fields* — soil, irrigation, planting date, management — not more weather
+and not a different estimator.
 
 Permutation importance on held-out ground is led by `ndmi` and `evi`, with real contributions from
 the agronomy (`et0_90`, `dry_spell_30`, `stage_kc`) — at half this sample size the model was

@@ -19,8 +19,8 @@ composed by an arithmetic rule anyone can check.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
-
+import math
+from dataclasses import asdict, dataclass, field
 
 # Attributes that must never enter the vulnerability score. They are retained upstream for
 # *fairness auditing* — measuring whether the ranking disadvantages these groups — but a model that
@@ -30,6 +30,41 @@ PROTECTED_ATTRIBUTES = frozenset({"head_gender", "household_max_education", "rel
 
 def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
+
+
+# Mirrors `training.dataset.SEVERE_Z`, the anomaly at which the label calls a field severely
+# stressed. Restated rather than imported: serving must not depend on the training package. A test
+# pins the two together, so a change to one fails rather than drifting.
+SEVERE_ANOMALY_Z = -1.0
+
+# Logistic width. A hard ramp between the label's two cut points assigns exactly 0.0 to every field
+# above -0.35 — 68% of them — and ties are invisible to a ranking: measured leave-one-cluster-out
+# over all six clusters it costs 23% of the rank correlation (rho 0.351 -> 0.271). A smooth
+# strictly-monotone squash keeps the whole ordering inside the same [0, 1] the hazard API needs.
+ANOMALY_SOFTNESS = 0.5
+
+
+def vegetation_hazard_from_anomaly(ndvi_z_peer: float | None) -> float:
+    """Persistence: carry the field's current peer anomaly forward as the vegetation hazard.
+
+        h = 1 / (1 + exp((z - SEVERE_ANOMALY_Z) / ANOMALY_SOFTNESS))
+
+    Centred on the severe cut, so h = 0.5 exactly at the threshold the label calls severe, rising
+    toward 1 as the field falls further behind its neighbours and toward 0 as it pulls ahead.
+
+    This exists because it measurably out-ranks the learned model it replaces. Leave-one-cluster-out
+    against the continuous target, the trained classifier scores rho = 0.191 and this scores 0.351 —
+    better in 5 of 6 clusters, and by 0.13-0.47 in the four where it wins. Vegetation is strongly
+    autocorrelated month to month, and 37 of the model's 40 features are cluster-level weather that
+    a peer-relative label cancels by construction, so the model had little left to add and noise to
+    add it with. See `docs/model-design.md`.
+
+    An absent anomaly yields 0.0 — no canopy evidence means no canopy hazard, and the physical
+    hazards carry the assessment, exactly as they do when no satellite scene is available at all.
+    """
+    if ndvi_z_peer is None or math.isnan(ndvi_z_peer):
+        return 0.0
+    return _clamp01(1.0 / (1.0 + math.exp((ndvi_z_peer - SEVERE_ANOMALY_Z) / ANOMALY_SOFTNESS)))
 
 
 def noisy_or(probabilities: list[float]) -> float:
