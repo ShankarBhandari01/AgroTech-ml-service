@@ -4,6 +4,7 @@ venv/
 __pycache__/
 *.pyc
 .env
+.env.env.bak
 # macOS finder metadata — noise in every diff, never wanted in a commit.
 .DS_Store
 **/.DS_Store

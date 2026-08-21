@@ -2,6 +2,7 @@
 # .gitignore, which excludes `venv/` but not `.venv/` — a 1 GB upload on every build.
 .venv/
 venv/
+.env.env.bak
 __pycache__/
 **/__pycache__/
 *.pyc
