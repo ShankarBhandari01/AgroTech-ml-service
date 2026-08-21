@@ -265,6 +265,11 @@ class PredictionsService:
         # Precomputed row when the nightly job has produced a fresh one, live upstream otherwise.
         # The fallback is deliberately kept: a new field registered this morning still gets a
         # prediction today, it just pays the latency once.
+        # Loaded before the branch because `cluster_bounds` is needed to report which trained
+        # region this field falls in, and that goes on the response whichever hazard source is
+        # configured — a field outside every cluster is an extrapolation either way.
+        model, columns, artifact_version, bounds, stats = self.model_manager.agronomic_model()
+
         cached = store.read_latest_features(self.db, field_id) if self.db is not None else None
         if cached:
             row, ctx, feature_source = cached["features"], cached["context"], "precomputed"
@@ -292,7 +297,7 @@ class PredictionsService:
         probabilities_of = PredictionResponse.model_fields["probabilities_of"].default
         if index_source == "sentinel-2":
             if settings.VEGETATION_HAZARD_SOURCE == "model":
-                model, columns, model_version, bounds, stats = self.model_manager.agronomic_model()
+                model_version = artifact_version
                 # Derived here rather than in `gather_upstream` so a `field_features` row stored by
                 # an older precompute run still gets its twins — arithmetic over the raw row and
                 # the artifact's snapshot, with no upstream call to pay for.
