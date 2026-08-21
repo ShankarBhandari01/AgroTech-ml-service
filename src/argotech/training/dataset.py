@@ -64,6 +64,15 @@ CLUSTERS = [
     {"name": "Kenya_Rift_Valley",   "lat": (-0.2, 1.2),  "lon": (34.8, 36.1)},
     {"name": "Ethiopian_Highlands", "lat": (8.3, 9.9),   "lon": (38.0, 39.6)},
     {"name": "Tanzania_Morogoro",   "lat": (-8.0, -6.5), "lon": (36.4, 37.8)},
+    # Niger Delta. Added because it is where the registered farmers actually are — both farms in
+    # the production database sit near 4.93N 6.34E, and `assign_cluster` returned None for them, so
+    # every prediction there ran with all 17 cluster-relative twins and the peer anomaly NaN.
+    #
+    # Agronomically it is unlike the other six: coastal rainforest, ~2500-4000 mm of rain against
+    # the Sahel's 600-900, two cropping seasons rather than one, and root crops and vegetables
+    # rather than cereals. It will not behave like a savannah cluster and should not be expected to
+    # — which is the argument for sampling it rather than extrapolating into it.
+    {"name": "Niger_Delta",         "lat": (4.3, 5.6),   "lon": (5.6, 6.9)},
 ]
 
 LABEL_HORIZON_INTERVALS = 1     # one P30D bucket ahead
