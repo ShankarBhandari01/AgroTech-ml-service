@@ -67,6 +67,16 @@ def test_persistence_out_ranks_the_hard_ramp_it_replaced():
     assert len(set(logistic)) == 4, "the logistic keeps them orderable"
 
 
+def test_the_default_hazard_source_is_the_model():
+    """The classifier lost to persistence on rho (0.196 vs 0.351), which is why the default was
+    `persistence`. The regressor draws level (0.342) and beats it on P@25 (0.741 vs 0.51), so the
+    default flips. Pinned because the justifying comment in config.py must not outlive its numbers.
+    """
+    from argotech.config import Settings
+
+    assert Settings.model_fields["VEGETATION_HAZARD_SOURCE"].default == "model"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

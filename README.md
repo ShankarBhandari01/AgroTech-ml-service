@@ -287,7 +287,7 @@ comes from the container environment or the default.
 | --- | --- | --- |
 | `DATABASE_URL` | `postgresql://postgres:password@localhost:5432/agrotech` | Reads the backend's farmer tables; owns `field_features`, `predictions`, `field_outcomes`. A `postgres://` prefix is rewritten |
 | `AGRONOMIC_MODEL_PATH` | `artifacts/agronomic_risk.joblib` | Model artifact, loaded by relative path from the working directory. Only read when `VEGETATION_HAZARD_SOURCE=model` |
-| `VEGETATION_HAZARD_SOURCE` | `persistence` | Where the vegetation hazard comes from. `persistence` carries the field's own peer anomaly forward; `model` runs the trained classifier. See [The model](#the-model) |
+| `VEGETATION_HAZARD_SOURCE` | `model` | Where the peer anomaly fed to the hazard map comes from. `model` predicts it 30 days ahead (`HistGradientBoostingRegressor` on `forward_z`); `persistence` carries the field's own observed value forward. Same mapping either way. See [The model](#the-model) |
 | `SENTINEL_CLIENT_ID` | `""` | CDSE OAuth client id. Blank disables the satellite path entirely |
 | `SENTINEL_CLIENT_SECRET` | `""` | CDSE OAuth client secret |
 | `SENTINEL_TOKEN_URL` | CDSE Keycloak token endpoint | Override for commercial Sentinel Hub |

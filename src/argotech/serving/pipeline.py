@@ -64,15 +64,15 @@ PERSISTENCE_VERSION = "persistence-v1"
 def _severity_to_probabilities(hazard: float) -> PredictionProbabilities:
     """Encode a scalar vegetation hazard as the 3-class vector the Kotlin client requires.
 
-    `probabilities` is typed `Map<String, Double>` downstream and is not optional, so the
-    persistence path has to emit three numbers. Rather than invent a posterior it does not have,
-    this puts all the mass on the two classes adjacent to the hazard value — the unique distribution
-    that reproduces the model path's own summary statistic:
+    `probabilities` is typed `Map<String, Double>` downstream and is not optional, so a number has
+    to become three. Rather than invent a posterior — neither hazard source has one, since both
+    produce a single scalar — this puts all the mass on the two classes adjacent to the hazard
+    value, the unique distribution satisfying
 
         h = 0.5 * p_medium + 1.0 * p_high
 
-    so a consumer computing expected severity gets the identical number from either source. It is an
-    encoding of one scalar, not a confidence, and `probabilities_of` says so on the wire.
+    so a consumer computing expected severity recovers the hazard exactly. It is an encoding of one
+    scalar, not a confidence, and `probabilities_of` says so on the wire.
     """
     h = max(0.0, min(1.0, hazard))
     if h <= 0.5:
