@@ -208,9 +208,17 @@ class PredictionsService:
             raise HTTPException(
                 404, f"Farmer '{self.data.farmer_id}' not found in database.") from e
 
+        # Coordinates, size, state and crops come from `farms`, not `farmer_profiles`. The profile
+        # table still carries those columns but they are never populated — registration writes them
+        # to `farms`, keyed by `farmer_profile_id`. Reading the profile meant every farmer looked
+        # like it had no location, so `/predict/farmer` returned 422 for all of them.
+        #
+        # A farmer may hold several farms (`farms.farmer_profile_id` is not unique). This takes the
+        # most recently created one, which is a placeholder for a real choice: the prediction is
+        # about a *field*, so the caller should eventually name which farm it means.
         query = text("""
             SELECT
-                fp.user_id, fp.farm_size, fp.state, fp.latitude, fp.longitude, fp.crops,
+                fp.user_id, f.farm_size, f.state, f.latitude, f.longitude, f.crops,
                 fmp.yield_value, fmp.has_extension_access, fmp.household_max_education,
                 fmp.shock_level, fmp.received_assistance, fmp.used_fertilizer,
                 fmp.household_size, fmp.transport_cost, fmp.dependency_ratio,
@@ -220,6 +228,13 @@ class PredictionsService:
                 (SELECT COUNT(*) FROM farmers_crops WHERE farmer_id = fp.user_id) as crop_diversity_score
             FROM farmer_profiles fp
             LEFT JOIN farmers_ml_profiles fmp ON fmp.farmer_id = fp.user_id
+            LEFT JOIN LATERAL (
+                SELECT farm_size, state, latitude, longitude, crops
+                FROM farms
+                WHERE farmer_profile_id = fp.user_id
+                ORDER BY created_at DESC NULLS LAST
+                LIMIT 1
+            ) f ON TRUE
             WHERE fp.user_id = :farmer_id
         """)
         result = await run_in_threadpool(
@@ -262,6 +277,15 @@ class PredictionsService:
         crop_health = ctx.get("crop_health")
         dsv_total, spray_due = ctx["dsv_total"], ctx["spray_due"]
 
+        # Which trained region this field falls in, or None when it falls outside every one. Computed
+        # unconditionally because it is reported on the response either way: None means the model is
+        # extrapolating, and that is true regardless of which hazard source is configured.
+        cluster = assign_cluster(lat, lon, bounds)
+        if cluster is None:
+            logger.warning("field=%s (%.4f, %.4f) falls outside every trained cluster — the "
+                           "cluster-relative twins and the peer anomaly will be NaN", field_id,
+                           lat, lon)
+
         # ---- vegetation hazard --------------------------------------------
         vegetation_hazard, probabilities = 0.0, None
         model_version = "none"
@@ -272,7 +296,6 @@ class PredictionsService:
                 # Derived here rather than in `gather_upstream` so a `field_features` row stored by
                 # an older precompute run still gets its twins — arithmetic over the raw row and
                 # the artifact's snapshot, with no upstream call to pay for.
-                cluster = assign_cluster(lat, lon, bounds)
                 row = {**row, **cluster_relative_row(row, stats.get(cluster))}
                 zhat = await run_in_threadpool(model.predict, pd.DataFrame([row])[columns])
                 forecast_z = float(zhat[0])
@@ -350,6 +373,7 @@ class PredictionsService:
                 probability=round(hazard.combined, 3),
                 primary_drivers=drivers[:4],
                 model_contributed=index_source == "sentinel-2",
+                cluster=cluster,
             ),
             risk_assessment=RiskAssessmentDetail(
                 risk_score=assessment.risk_score,

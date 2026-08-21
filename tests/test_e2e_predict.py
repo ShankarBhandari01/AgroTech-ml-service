@@ -283,6 +283,27 @@ def test_every_feature_the_artifact_declares_is_actually_fed(monkeypatch):
     assert not unfed, f"artifact columns fed NaN on a fully successful build: {unfed}"
 
 
+def test_a_field_outside_every_trained_cluster_says_so_on_the_wire(client):
+    """Out-of-cluster is an extrapolation, and the response has to admit it.
+
+    The artifact carries per-cluster standardisation constants, so a field outside all six gets NaN
+    for all 17 `_cz` twins and for the peer anomaly — the model runs on roughly half its inputs and
+    persistence returns no vegetation hazard at all. Every other number looks entirely ordinary,
+    which is why `cluster: null` has to be visible rather than inferred.
+
+    Bayelsa, in the Niger Delta: coastal rainforest, and the training set is Sahel, savannah and
+    East African highlands. These are the coordinates of a real registered farm.
+    """
+    inside = client.post("/predict/coldstart", json={
+        "latitude": 10.8, "longitude": 7.9, "crop_type": "Maize", "farm_size": 2.0}).json()
+    outside = client.post("/predict/coldstart", json={
+        "latitude": 4.9372, "longitude": 6.3372, "crop_type": "Maize", "farm_size": 2.0}).json()
+
+    assert inside["inference"]["cluster"] == "Kaduna_Grain_Belt"
+    assert outside["inference"]["cluster"] is None, (
+        "a field outside every trained cluster must report it, not look like any other prediction")
+
+
 def test_a_legacy_client_sending_model_name_still_works(client):
     """`model_name`/`model_alias` were removed from the schemas. Pydantic ignores unknown fields, so
     the Kotlin client can keep sending them until it is updated — pinned here because the removal is
