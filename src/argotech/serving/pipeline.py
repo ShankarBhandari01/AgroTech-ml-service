@@ -278,8 +278,13 @@ class PredictionsService:
                 # Persistence: the field's *observed* anomaly, carried forward unchanged.
                 forecast_z, model_version = row.get("ndvi_z_peer"), PERSISTENCE_VERSION
 
-            # One mapping for both sources. The paths differ only in where z comes from — observed
-            # today, or predicted 30 days out — so the A/B compares exactly one thing.
+            # One mapping for both sources: where z comes from differs — observed today, or predicted
+            # 30 days out — but the logistic centre/softness are the same fixed constants either way.
+            # That makes the *ranking* comparison like-for-like (the rho/P@25 gain that justified this
+            # switch). It does not make the *magnitude* comparable: a regressor predicts a conditional
+            # mean, which is compressed relative to the observation it predicts (std 0.54 vs. 1.18 on
+            # the training set), so the model path yields systematically smaller vegetation hazards
+            # than persistence would have for the same field — a gap the rank metrics cannot see.
             vegetation_hazard = risk.vegetation_hazard_from_anomaly(forecast_z)
             probabilities = _severity_to_probabilities(vegetation_hazard)
             probabilities_of = ("vegetation hazard (peer-relative canopy stress, 30-day horizon) — "

@@ -7,9 +7,10 @@ class PredictionProbabilities(BaseModel):
     """Learned model output over the three forward-stress classes. All-zero above `low` when no
     cloud-free scene was available and the model did not contribute.
 
-    **These describe the vegetation hazard term only, not overall risk.** They are the calibrated
-    posterior for "will this field's canopy be stressed relative to its peers in 30 days" — one of
-    four hazards that feed the noisy-OR, alongside drought, disease and heat. `prediction` and
+    **These describe the vegetation hazard term only, not overall risk.** They are an encoding of a
+    single scalar hazard — "will this field's canopy be stressed relative to its peers in 30 days" —
+    not a fitted posterior; see `_severity_to_probabilities`. One of four hazards that feed the
+    noisy-OR, alongside drought, disease and heat. `prediction` and
     `risk_score_percent` come from the full Hazard x Exposure x Vulnerability composition, so they
     routinely disagree with the argmax here: a field can be 66% "low" on canopy stress and still be
     CRITICAL because accumulated blight severity crossed the spray threshold.
@@ -105,8 +106,8 @@ class PredictionResponse(BaseModel):
     priority_label: str
     risk_score_percent: float
     probabilities: PredictionProbabilities = Field(
-        description="Calibrated posterior for the *vegetation hazard* term only. Do not read its "
-                    "argmax as the overall risk class — that is `prediction`.",
+        description="Encoding of the scalar *vegetation hazard* term only, not a fitted posterior. "
+                    "Do not read its argmax as the overall risk class — that is `prediction`.",
     )
     # Root-level, so an unknown-field-tolerant client ignores it safely. See PredictionProbabilities.
     probabilities_of: str = Field(
