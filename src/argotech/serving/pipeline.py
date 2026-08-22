@@ -25,7 +25,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from argotech.config import settings
-from argotech.data import meteo, store
+from argotech.data import backend_schema, meteo, store
 from argotech.data.sentinel import sentinel_client
 from argotech.domain import agronomy, indices, risk
 from argotech.features.agronomic import (
@@ -216,37 +216,13 @@ class PredictionsService:
             raise HTTPException(
                 404, f"Farmer '{self.data.farmer_id}' not found in database.") from e
 
-        # Coordinates, size, state and crops come from `farms`, not `farmer_profiles`. The profile
-        # table still carries those columns but they are never populated — registration writes them
-        # to `farms`, keyed by `farmer_profile_id`. Reading the profile meant every farmer looked
-        # like it had no location, so `/predict/farmer` returned 422 for all of them.
-        #
-        # A farmer may hold several farms (`farms.farmer_profile_id` is not unique). This takes the
-        # most recently created one, which is a placeholder for a real choice: the prediction is
-        # about a *field*, so the caller should eventually name which farm it means.
-        query = text("""
-            SELECT
-                fp.user_id, f.farm_size, f.state, f.latitude, f.longitude, f.crops,
-                fmp.yield_value, fmp.has_extension_access, fmp.household_max_education,
-                fmp.shock_level, fmp.received_assistance, fmp.used_fertilizer,
-                fmp.household_size, fmp.transport_cost, fmp.dependency_ratio,
-                fmp.asset_score, fmp.postharvest_activity_score, fmp.digital_access_score,
-                fmp.has_veterinary_access, fmp.market_access_score, fmp.received_credit,
-                fmp.head_gender,
-                (SELECT COUNT(*) FROM farmers_crops WHERE farmer_id = fp.user_id) as crop_diversity_score
-            FROM farmer_profiles fp
-            LEFT JOIN farmers_ml_profiles fmp ON fmp.farmer_id = fp.user_id
-            LEFT JOIN LATERAL (
-                SELECT farm_size, state, latitude, longitude, crops
-                FROM farms
-                WHERE farmer_profile_id = fp.user_id
-                ORDER BY created_at DESC NULLS LAST
-                LIMIT 1
-            ) f ON TRUE
-            WHERE fp.user_id = :farmer_id
-        """)
+        # The query lives in `data/backend_schema.py`, with every other read of the Kotlin
+        # backend's tables. It used to be written out here AND in jobs/precompute.py, and the two
+        # drifted: when the backend replaced `farms.crops` with a `farm_crops` join table, this copy
+        # started failing outright while the other silently fell back to a hardcoded crop. One
+        # definition means the next migration breaks one query loudly instead of two quietly.
         result = await run_in_threadpool(
-            self.db.execute(query, {"farmer_id": self.data.farmer_id}).fetchone
+            backend_schema.fetch_farmer_features, self.db, self.data.farmer_id
         )
         if not result:
             raise HTTPException(404, f"Farmer '{self.data.farmer_id}' not found in database.")
@@ -420,12 +396,10 @@ class PredictionsService:
 
     @staticmethod
     def _crop_name(farmer) -> str:
-        crops = farmer.crops
-        if isinstance(crops, list) and crops:
-            return str(crops[0]).strip()
-        if isinstance(crops, str) and crops.strip():
-            return crops.split(",")[0].strip()
-        return "Maize"
+        # One definition, shared with the nightly precompute — see data/backend_schema.py. The
+        # "Maize" fallback lives there too, so both callers make the same assumption about a field
+        # whose crops were never captured.
+        return backend_schema.dominant_crop(farmer.crops)
 
     @staticmethod
     def _parse_farm_size(val: Any) -> float:

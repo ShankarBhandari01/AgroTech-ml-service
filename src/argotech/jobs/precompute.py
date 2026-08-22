@@ -18,9 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 
-from sqlalchemy import text
-
-from argotech.data import store
+from argotech.data import backend_schema, store
 from argotech.data.db import SessionLocal
 from argotech.serving.container import model_manager
 from argotech.serving.pipeline import gather_upstream
@@ -30,28 +28,10 @@ from argotech.serving.pipeline import gather_upstream
 DELAY_SECONDS = 1.5
 
 
-def list_fields(db, limit: int | None = None) -> list[dict]:
-    """Registered fields with usable coordinates, most recently updated first."""
-    rows = db.execute(text(f"""
-        SELECT fp.user_id AS field_id, fp.latitude, fp.longitude, fp.crops
-        FROM farmer_profiles fp
-        WHERE fp.latitude IS NOT NULL AND fp.longitude IS NOT NULL
-        ORDER BY fp.user_id
-        {'LIMIT :limit' if limit else ''}
-    """), {"limit": limit} if limit else {}).fetchall()
-
-    fields = []
-    for r in rows:
-        crops = r.crops
-        if isinstance(crops, list) and crops:
-            crop = str(crops[0]).strip()
-        elif isinstance(crops, str) and crops.strip():
-            crop = crops.split(",")[0].strip()
-        else:
-            crop = "Maize"
-        fields.append({"field_id": r.field_id, "latitude": float(r.latitude),
-                       "longitude": float(r.longitude), "crop": crop})
-    return fields
+# `list_fields` moved to data/backend_schema.py, next to the same query the prediction endpoint runs.
+# Its version read coordinates from `farmer_profiles`, where nothing has written them since plot data
+# moved to `farms` — so the filter matched no rows and this job precomputed nothing at all, quietly.
+list_fields = backend_schema.list_fields
 
 
 async def run(limit: int | None = None, delay: float = DELAY_SECONDS) -> dict:
