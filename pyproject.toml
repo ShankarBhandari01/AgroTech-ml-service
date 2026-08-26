@@ -43,6 +43,10 @@ train = [
   "pyarrow",   # parquet for the built training set
   "torch",     # frozen Presto encoder only; no training, no GPU
   "einops",    # required by the vendored Presto file
+  "pyyaml",    # experiment configs; an experiment is a file, not a flag
+  # Local file store only — mlruns/ plus the sqlite backend already on disk. No tracking server.
+  # Here for two things the paper needs: run comparison across arms, and a staged model registry.
+  "mlflow",
 ]
 dev = ["pytest", "ruff"]
 
