@@ -124,24 +124,48 @@ def test_summary_is_grouped_by_protocol_not_pooled_across_them():
 # ---- peer_key wiring: build_target and the peer transform both move inside the fold loop --------
 
 def test_leaky_reproduces_the_pre_change_numbers():
-    """`peer_key: leaky` must behave exactly like the pre-fold-fit pipeline: build_target once on
-    the whole panel, split after — the control arm the fold-fitted paths are measured against."""
+    """`peer_key: leaky` must behave like the pre-fold-fit pipeline: build_target once, split after.
+
+    Exact for the spatial protocol, verified below. NOT exact for temporal: forward_chaining's
+    purge/embargo gap (splits.py) drops a thin sliver of rows from every fold's train-union-test,
+    and those rows' own `ndvi_z_peer` — already observed before the boundary, only their LABEL
+    isn't settled yet — was part of a site's history the pre-change pipeline's single whole-df
+    `build_target` call saw, and this fold-scoped one (deliberately: see `_score_fold`) does not.
+    That is measured and small (see the bound below), not hidden. What this test actually needs to
+    hold regardless — the fix for the review's critical finding — is that a site's cross-boundary
+    history WITHIN a fold's own train+test union is no longer truncated; the previous version of
+    this test only exercised the spatial protocol, where every site sits wholly on one side of a
+    LOCO fold, so it could not have caught that truncation.
+    """
     from argotech.lab.run import ARMS, SPLITS, _score_arm
     from argotech.lab.targets import build_target as _bt
 
     df = _panel()
-    frame, features = _bt(df, CFG["target"], features=CFG["features"],
-                           min_history=CFG["min_history"], shrink=CFG["shrink"])
-    expected = {name: [] for name in CFG["arms"]}
-    for _fold_name, train, test in SPLITS["spatial"](frame):
-        for name in CFG["arms"]:
-            expected[name].append(
-                _score_arm(ARMS[name](CFG["seed"]), train, test, features, CFG["tau"])["net_benefit"])
+    cfg = {**CFG, "splits": ["spatial", "temporal"]}
+    frame, features = _bt(df, cfg["target"], features=cfg["features"],
+                           min_history=cfg["min_history"], shrink=cfg["shrink"])
+    expected = {split_name: {name: [] for name in cfg["arms"]} for split_name in cfg["splits"]}
+    for split_name in cfg["splits"]:
+        for _fold_name, train, test in SPLITS[split_name](frame):
+            for name in cfg["arms"]:
+                expected[split_name][name].append(
+                    _score_arm(ARMS[name](cfg["seed"]), train, test, features,
+                               cfg["tau"])["net_benefit"])
 
-    out = run_experiment(CFG, df)
-    for name in CFG["arms"]:
-        got = [f["arms"][name]["net_benefit"] for f in out["folds"] if f["split"] == "spatial"]
-        assert got == expected[name], f"{name}: leaky run diverged from the pre-change pipeline"
+    out = run_experiment(cfg, df)
+    for name in cfg["arms"]:
+        got_spatial = [f["arms"][name]["net_benefit"] for f in out["folds"] if f["split"] == "spatial"]
+        assert got_spatial == expected["spatial"][name], \
+            f"{name}: spatial leaky run diverged from the pre-change pipeline"
+
+        got_temporal = [f["arms"][name]["net_benefit"]
+                         for f in out["folds"] if f["split"] == "temporal"]
+        exp_temporal = expected["temporal"][name]
+        assert len(got_temporal) == len(exp_temporal)
+        drift = max(abs(a - b) for a, b in zip(got_temporal, exp_temporal, strict=True))
+        assert drift < 0.03, (
+            f"{name}: temporal leaky run diverged by more than the purge gap explains "
+            f"(drift={drift:.4f}): {got_temporal} vs {exp_temporal}")
     assert all(f["peer_coverage"] == 1.0 for f in out["folds"]), "leaky must record coverage 1.0"
 
 
@@ -202,3 +226,74 @@ def test_the_three_peer_keys_produce_different_summaries():
            ["precision_at_25_mean"]
            for kind in ("leaky", "cluster_month", "geo_month")}
     assert len(set(p25.values())) == 3, f"peer_key had no effect on the summary: {p25}"
+
+
+# ---- Review findings: alpha_hat's cross-boundary history, and within_xy's shared feature list ---
+
+def test_alpha_hat_sees_a_sites_full_history_across_the_temporal_boundary():
+    """Regression for the review's critical finding: build_target must not be called separately on
+    train and test. A post-boundary test row's alpha_hat has to see its own pre-boundary (train-
+    side) history too — that history is genuinely available at prediction time, and truncating it
+    is information loss, not a leak fix."""
+    from argotech.lab.run import _score_fold
+
+    train_raw = pd.DataFrame([
+        {"site_id": "S0", "cluster": "C0", "obs_date": f"2025-01-{i + 1:02d}",
+         "ndvi_z_peer": float(i), "rain_30": 1.0, "forward_z": 0.0}
+        for i in range(6)])
+    test_raw = pd.DataFrame([
+        {"site_id": "S0", "cluster": "C0", "obs_date": f"2025-02-{i + 1:02d}",
+         "ndvi_z_peer": v, "rain_30": 1.0, "forward_z": 0.0}
+        for i, v in enumerate((6.0, 7.0))])
+
+    cfg = {"target": "within_y", "features": ["ndvi_z_peer", "rain_30"],
+           "min_history": 1, "shrink": 0.0, "peer_key": "leaky"}
+    _, test_t, _, _ = _score_fold(cfg, train_raw, test_raw)
+
+    # Row 1's prior history is all 6 train rows (mean 2.5); row 2's is those 6 plus row 1 (mean 3.0).
+    # Truncated to test-side-only, row 1 would have NO prior observation (NaN, dropped) and row 2
+    # would average just the one prior test row (6.0), not 2.5 and 3.0.
+    assert list(test_t["alpha_hat"]) == [2.5, 3.0], (
+        "a test row's alpha_hat must be the expanding mean over ALL strictly-prior observations of "
+        f"its own site, train-side included: got {list(test_t['alpha_hat'])}")
+
+
+def test_within_xy_spatial_run_survives_a_column_degenerate_only_in_the_held_out_cluster():
+    """Regression for BUG-1: `heat_stress_days`-shaped defect — a feature identically constant in
+    exactly the held-out cluster, varying everywhere else. Must not raise, and every fold's train
+    and test frames must end up with the same feature list (guaranteed here by construction: both
+    are slices of one build_target call, so there is no separate-decision path left to disagree)."""
+    rows = []
+    for cluster in ("A", "B", "C"):
+        for k in range(4):
+            for j in range(6):
+                rows.append({"site_id": f"{cluster}{k}", "cluster": cluster,
+                             "obs_date": f"2025-{j + 1:02d}-01",
+                             "ndvi_z_peer": (k - 1.5) + 0.1 * j,
+                             "forward_z": (k - 1.5) + 0.1 * j,
+                             # constant every row in cluster A only; a real, varying signal elsewhere
+                             "quirky": 0.0 if cluster == "A" else float(j)})
+    df = pd.DataFrame(rows)
+    cfg = {"target": "within_xy", "features": ["ndvi_z_peer", "quirky"], "arms": ["zero"],
+           "splits": ["spatial"], "min_history": 2, "shrink": 0.0, "seed": 42, "tau": -0.5,
+           "peer_key": "leaky", "lat_band": 20.0, "elev_band": 1000.0}
+
+    out = run_experiment(cfg, df)  # must not raise KeyError
+    assert len(out["folds"]) == 3
+    for fold in out["folds"]:
+        assert fold["arms"], f"fold {fold['fold']} was unexpectedly skipped"
+
+
+def test_delta_z_under_cluster_month_skips_rather_than_crashes(capsys):
+    """Regression for BUG-2: under cluster_month a held-out cluster gets no peer reference at all
+    (peer_coverage 0.0), so delta_z's ndvi_z_peer-derived ztilde is entirely NaN and build_target
+    drops every row. That is a real finding (delta_z is undefined for an unseen region under an
+    honest cluster-keyed reference), not a bug to paper over with a fabricated value — the fold
+    must be skipped and named, not handed to sklearn as zero rows."""
+    out = run_experiment({**GEO_CFG, "target": "delta_z", "peer_key": "cluster_month"}, _geo_panel())
+    assert out["folds"], "no folds ran at all"
+    for fold in out["folds"]:
+        assert fold.get("skipped"), f"fold {fold['fold']} should have been skipped, was scored"
+        assert not fold["arms"]
+    err = capsys.readouterr().err
+    assert "delta_z" in err and "cluster_month" in err, "the skip must name the target and peer_key"

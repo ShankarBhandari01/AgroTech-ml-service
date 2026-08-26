@@ -145,6 +145,44 @@ def test_within_xy_drops_a_time_invariant_column(capsys):
     assert "elevation" in capsys.readouterr().out, "the drop must be named, not silent"
 
 
+def _panel_two_clusters() -> pd.DataFrame:
+    """`quirky` varies month-to-month for cluster A's sites, but is a hard constant (0.0, every
+    month) for cluster B's — the exact shape of the real defect: `heat_stress_days` varies across
+    the panel but is identically zero, every month, in `Kaduna_Grain_Belt`."""
+    rows = []
+    for cluster in ("A", "B"):
+        for k in range(3):
+            for j in range(6):
+                rows.append({"site_id": f"{cluster}{k}", "cluster": cluster,
+                             "obs_date": f"2025-01-{j + 1:02d}",
+                             "ndvi_z_peer": (k - 1.0) + 0.1 * j,
+                             "forward_z": (k - 1.0) + 0.1 * j,
+                             "quirky": float(j) if cluster == "A" else 0.0})
+    return pd.DataFrame(rows)
+
+
+def test_within_xy_keeps_a_column_that_only_varies_in_train():
+    """BUG-1's fix: degeneracy is decided from `train_mask` alone. A column varying in train (here
+    cluster A) but constant across every held-out test row (cluster B) must still be kept — the
+    demeaning is legitimate there even though this particular test sample happens not to move."""
+    df = _panel_two_clusters()
+    train_mask = (df["cluster"] == "A").to_numpy()
+    _, feats = build_target(df, "within_xy", features=["ndvi_z_peer", "quirky"],
+                            min_history=3, train_mask=train_mask)
+    assert "quirky_w" in feats, "a column varying in train must not be dropped for test's sake"
+
+
+def test_within_xy_drops_a_column_thats_constant_in_train_even_if_test_varies():
+    """The other half of the same rule: deciding from the UNION (or from test) would let test data
+    alone earn a column a vote it should never get — the same transduction `fit_peer_stats` refuses
+    by only ever seeing training rows."""
+    df = _panel_two_clusters()
+    train_mask = (df["cluster"] == "B").to_numpy()
+    _, feats = build_target(df, "within_xy", features=["ndvi_z_peer", "quirky"],
+                            min_history=3, train_mask=train_mask)
+    assert "quirky_w" not in feats, "a column constant in train must be dropped even if test varies"
+
+
 def test_delta_z_is_the_first_difference():
     df = _panel()
     out, _ = build_target(df, "delta_z", features=["ndvi_z_peer"], min_history=0)

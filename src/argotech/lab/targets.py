@@ -54,7 +54,8 @@ def alpha_hat(df: pd.DataFrame, column: str = "ndvi_z_peer", unit: str = "site_i
     return out.reindex(df.index)
 
 
-def _within(df: pd.DataFrame, columns: list[str], unit: str, shrink: float = 0.0) -> pd.DataFrame:
+def _within(df: pd.DataFrame, columns: list[str], unit: str, shrink: float = 0.0,
+            train_mask: np.ndarray | None = None) -> pd.DataFrame:
     """Each column minus its own strictly-prior field mean. The Frisch-Waugh-Lovell other half.
 
     A time-invariant regressor (e.g. `elevation`) demeans to exactly zero for every row with any
@@ -62,12 +63,20 @@ def _within(df: pd.DataFrame, columns: list[str], unit: str, shrink: float = 0.0
     its own prior mean. Handed to Ridge or the boosted arm as a live feature, an all-zero column is
     dead weight at best; excluded here rather than passed through, with a one-line note naming what
     was dropped so the exclusion is visible instead of silently changing the feature count.
+
+    `df` may be a concatenated train+test frame (it must be, for a fold: see `alpha_hat` and
+    `run.py`). `train_mask`, when given, is a boolean array the same length as `df` marking its
+    train rows: degeneracy (`std < 1e-12`) is then decided from THOSE rows only, never from the
+    union. Deciding it from the union would let a column that is constant in train but happens to
+    vary in test be kept on the strength of test data alone — the same transduction this module
+    exists to remove elsewhere. Without `train_mask`, degeneracy is decided from all of `df`.
     """
     out = {}
     dropped = []
     for c in columns:
         col = df[c] - alpha_hat(df, column=c, unit=unit, min_history=1, shrink=shrink)
-        if col.std(skipna=True) < 1e-12:
+        std_source = col.iloc[train_mask] if train_mask is not None else col
+        if std_source.std(skipna=True) < 1e-12:
             dropped.append(c)
             continue
         out[c + WITHIN_SUFFIX] = col
@@ -78,7 +87,8 @@ def _within(df: pd.DataFrame, columns: list[str], unit: str, shrink: float = 0.0
 
 
 def build_target(df: pd.DataFrame, kind: str, features: list[str], unit: str = "site_id",
-                 min_history: int = 0, shrink: float = 0.0) -> tuple[pd.DataFrame, list[str]]:
+                 min_history: int = 0, shrink: float = 0.0,
+                 train_mask: np.ndarray | None = None) -> tuple[pd.DataFrame, list[str]]:
     """Attach `alpha_hat`, `ztilde` and `persistence_pred`, drop rows with no reference, and name the
     arm's features.
 
@@ -90,6 +100,16 @@ def build_target(df: pd.DataFrame, kind: str, features: list[str], unit: str = "
     `ztilde` is: the field's raw level under `level_z`, its within-deviation under `within_y` /
     `within_xy`, and "no change" — 0.0 — under `delta_z`, whose target is already a difference. It
     lives here rather than in the arm because it is a property of the estimand, not of the model.
+
+    For a fold's train/test pair, `df` must be the CONCATENATED train+test frame, called once —
+    not train and test separately. `alpha_hat` is a strictly-prior expanding mean per site; called
+    on the test slice alone, a site's pre-boundary rows become invisible to its own post-boundary
+    `alpha_hat`, truncating real, legitimately-available history rather than fitting anything.
+    `run.py` splits the result back apart after this call, by which side each row came from.
+
+    `train_mask` (only meaningful under `within_xy`) is a boolean array the same length as `df`
+    marking its train rows, so the demeaned-column degeneracy decision is made from train alone —
+    see `_within`. It has no effect on `alpha_hat`, which correctly uses every row regardless.
     """
     if kind not in TARGET_KINDS:
         raise ValueError(f"unknown target kind {kind!r}; expected one of {TARGET_KINDS}")
@@ -106,7 +126,7 @@ def build_target(df: pd.DataFrame, kind: str, features: list[str], unit: str = "
         out["persistence_pred"] = out["ndvi_z_peer"] - out["alpha_hat"]
         names = list(features)
     elif kind == "within_xy":
-        within_df = _within(out, features, unit, shrink=shrink)
+        within_df = _within(out, features, unit, shrink=shrink, train_mask=train_mask)
         out = pd.concat([out, within_df], axis=1)
         out["ztilde"] = out["forward_z"] - out["alpha_hat"]
         out["persistence_pred"] = out["ndvi_z_peer"] - out["alpha_hat"]

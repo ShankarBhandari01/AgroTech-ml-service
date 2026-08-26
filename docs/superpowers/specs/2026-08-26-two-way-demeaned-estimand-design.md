@@ -346,6 +346,25 @@ should the reference cohort be defined so that it transfers to an unsampled regi
 AOA formalises; this section is the beginning of an answer to it, not a resolution: a measured trade
 in place of an unexamined default.
 
+**Only `level_z` supports a valid cross-`peer_key` comparison.** `within_y`'s target is `forward_z -
+alpha_hat`, and `alpha_hat` is derived from `ndvi_z_peer`; `delta_z`'s target is `forward_z -
+ndvi_z_peer` directly. Changing `peer_key` therefore changes `ndvi_z_peer`, which changes the TARGET
+for both of those kinds — not just the features an arm gets to see. A table comparing `leaky` against
+`cluster_month` against `geo_month` under `within_y` or `delta_z` is not comparing three models on
+one problem; it is comparing three models each scored against its own, different problem. `level_z`'s
+target is `forward_z` alone, which comes from the label's own (cluster, date) cohort at build time
+(`lab/panel.py`) and never touches `ndvi_z_peer` — it is the one target `peer_key` leaves untouched,
+and so the only one a cross-key table may legitimately be built from. Any such table must be
+restricted to `level_z`, or must carry this caveat explicitly; `run.py` also emits a one-line warning
+to stderr whenever a non-`level_z` target runs with a non-`leaky` `peer_key`, so generating one
+without seeing this is not possible by accident.
+
+For reference, the valid comparison — `level_z` net benefit, spatial / temporal — reads: `leaky`
++0.0064 / +0.0210; `cluster_month` −0.0019 / +0.0183; `geo_month` +0.0056 / +0.0185. Even here,
+`cluster_month`'s spatial figure is negative and `geo_month`'s spatial figure is a fraction of
+`leaky`'s — the fold-fitted reference costs real skill relative to the whole-frame leak it replaces,
+which is the leak's own size, not a defect in the replacement.
+
 ## 8. Serving
 
 The `/predict/farmer`, `/predict/crop-health` and `/outcomes` contracts are preserved. Three
