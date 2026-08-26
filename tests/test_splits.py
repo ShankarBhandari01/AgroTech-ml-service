@@ -17,8 +17,10 @@ def _df() -> pd.DataFrame:
     for c in ("C0", "C1", "C2"):
         for s in range(4):
             for m in range(1, 13):
+                obs = pd.Timestamp(f"2025-{m:02d}-01")
                 rows.append({"cluster": c, "site_id": f"{c}-{s}",
-                             "obs_date": f"2025-{m:02d}-01", "forward_z": 0.1 * m})
+                             "obs_date": obs, "label_date": obs + pd.Timedelta(days=30),
+                             "forward_z": 0.1 * m})
     return pd.DataFrame(rows)
 
 
@@ -36,6 +38,22 @@ def test_no_site_appears_on_both_sides_of_a_spatial_fold():
 def test_forward_chaining_never_trains_on_the_future():
     for name, train, test in forward_chaining(_df(), n_folds=3):
         assert train.obs_date.max() < test.obs_date.min(), f"{name} trains on the future"
+
+
+def test_forward_chaining_training_labels_are_known_by_the_boundary():
+    """The leak RESEARCH_SUMMARY:64 records as uncorrected: a training row whose outcome
+    lands after the boundary was not knowable when the first test prediction was made.
+
+    Cutting the training side on obs_date (the incumbent's construction, and what this
+    module shipped in its first commit) puts such rows in train. Cutting on label_date
+    does not. This test fails against the former.
+    """
+    df = _df()   # must now carry label_date = obs_date + 30 days
+    for name, train, test in forward_chaining(df, n_folds=3):
+        boundary = test.obs_date.min()
+        assert (train.label_date < boundary).all(), (
+            f"{name}: {(train.label_date >= boundary).sum()} training rows have outcomes "
+            "that postdate the first test prediction")
 
 
 def test_forward_chaining_training_sets_grow():

@@ -29,18 +29,23 @@ def leave_one_cluster_out(df: pd.DataFrame) -> Iterator[Fold]:
 
 
 def forward_chaining(df: pd.DataFrame, n_folds: int = 3) -> Iterator[Fold]:
-    """Expanding-window temporal folds, cut on the observation date.
+    """Expanding-window temporal folds, purged and embargoed at the boundary.
 
-    Cut on `obs_date`, the date a prediction would have been made, rather than on `label_date`.
-    Cutting on the label date would let the last month of training outcomes become known after the
-    first test prediction was made — the defect docs/RESEARCH_SUMMARY.md section 5 records as
-    uncorrected in the incumbent.
+    Test rows are cut on `obs_date`, the date a prediction would have been made: `obs_date >=
+    boundary`. Training rows are cut on `label_date`, the date the outcome became known:
+    `label_date < boundary`. Cutting *training* on `obs_date` instead — the incumbent's
+    construction — is the leak docs/RESEARCH_SUMMARY.md:64 records as uncorrected: it lets the
+    last month of training outcomes become known only after the first test prediction was made.
+
+    A row with `obs_date < boundary <= label_date` satisfies neither cut and falls into an
+    embargo gap between the two sides. That is deliberate, standard purged/embargoed
+    forward-chaining, not a bug.
     """
     dates = np.sort(df["obs_date"].unique())
     if len(dates) <= n_folds:
         return
     for cut in np.array_split(dates, n_folds + 1)[1:]:
         boundary = cut[0]
-        train, test = df[df["obs_date"] < boundary], df[df["obs_date"] >= boundary]
+        train, test = df[df["label_date"] < boundary], df[df["obs_date"] >= boundary]
         if len(train) and len(test):
             yield f"train < {boundary}", train, test
