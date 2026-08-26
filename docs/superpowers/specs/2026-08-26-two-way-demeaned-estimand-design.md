@@ -1,0 +1,364 @@
+# Design — a two-way demeaned estimand, a lab, and a closed loop
+
+Status: approved design, not yet implemented.
+Supersedes the learned layer described in `docs/model-design.md` §4.4, §9 and §9.1. Leaves §4.3
+(`domain/indices.py`), §4.5 (`domain/risk.py`) and §10 (serving architecture) standing.
+
+Every empirical number below is recomputed from a committed file. Fold means come from
+`artifacts/metrics.json` (4,596 samples, 4 held-out clusters, 40 features), not from prose. A claim
+that cannot be reproduced from a committed file is marked `[UNVERIFIED]`, the convention
+`docs/RESEARCH_SUMMARY.md` already uses.
+
+---
+
+## 1. The result being explained
+
+From `artifacts/metrics.json`, means over the four leave-one-cluster-out folds:
+
+| Blocked, 4-fold mean | Model | Persistence | Climatology |
+| --- | --- | --- | --- |
+| macro F1 | 0.4498 | 0.4783 | 0.4427 |
+| precision@25 | 0.6000 | 0.4900 | **0.6400** |
+| Spearman rho | 0.3976 | **0.4225** | 0.4145 |
+
+Means over the three forward-chaining folds:
+
+| Temporal, 3-fold mean | Model | Persistence | Climatology |
+| --- | --- | --- | --- |
+| macro F1 | 0.4631 | 0.4461 | **0.4803** |
+| precision@25 | 0.6000 | 0.5733 | **0.7200** |
+| Spearman rho | 0.4638 | 0.4020 | **0.5364** |
+
+Temporally the model loses to climatology on all three metrics. Spatially it loses to climatology on
+ranking and to persistence on rank correlation. Permutation importance on held-out ground is
+dominated by a single feature: `ndvi_z_peer` at +0.0642, with the second-placed feature at +0.0051 —
+a factor of 12.6.
+
+Successive additions did not move this. Radar contributed +0.0066 macro F1 with ECE worsening by
+0.0084; frozen Presto embeddings moved the boosted arm by −0.0228 and the linear arm by +0.0223; the
+full ten-band variant moved precision@25 by +0.109 with a seed spread of 0.14 on a 25-item metric
+(`docs/model-design.md` §9.1 E–G). A linear head beat gradient boosting out of cluster, 0.421 to
+0.408 (§9.1 C).
+
+Read together, these say the constraint is not capacity, not representation, and not sensing.
+
+## 2. Diagnosis
+
+The panel target decomposes as
+
+    z_{i,t+1} = alpha_i + gamma_t + eps_{i,t+1}
+
+where `alpha_i` is a time-invariant field effect, `gamma_t` a cohort-date effect, and `eps` the part
+that weather and agronomy could in principle explain.
+
+`forward_z` standardises each observation against its peers **at the same date within the same
+cluster**, which removes `gamma_t`. It never standardises against the field's own history, so
+`alpha_i` survives in the target.
+
+`add_site_climatology` in `training/train.py` computes each field's mean prior peer anomaly. That is
+an expanding-window estimator of `alpha_i`. So the "climatology baseline" and "the component the
+target failed to remove" are the same quantity, and the baseline wins by collecting it directly
+while the model must infer it from covariates. The permutation-importance profile is the signature:
+the model's one useful feature, `ndvi_z_peer`, is the current-period level, which is the best
+single-observation estimate of `alpha_i` available.
+
+This is the panel-data within-transformation problem. Cross-sectional demeaning to remove
+time-invariant unit characteristics is exactly the correction applied by "Forecasting Crop Yield
+Anomalies on Panel Data via Spatially Demeaned Ensembles" (*J. Agric. Biol. Environ. Stat.*, 2026,
+doi:10.1007/s13253-026-00743-8). Cited by title and DOI: the authorship shown by secondary indexes
+could not be confirmed against the publisher record, so it is `[UNVERIFIED]` and deliberately
+omitted rather than guessed. The repository performs one half of a two-way demeaning and is beaten by a
+baseline that supplies the other half.
+
+**Consequence for the literature, which is the research contribution.** Any NDVI-anomaly forecaster
+evaluated against persistence but not against an estimated field effect may be reporting skill that
+is a fixed effect in disguise. This repository has the negative result and the instrumentation to
+demonstrate the mechanism.
+
+## 3. Scope
+
+**Retired.** `forward_z` as the primary target; `artifacts/experimental/` and the unpromotable
+cluster-relative artifact; the `--no-radar` / `--no-bands` / `--seed` / `--folds-only` flag matrix as
+the experiment interface; the manual copy-into-`artifacts/` promotion path; the unreferenced `mlflow.db` and `mlruns/` as they
+stand today (no module imports mlflow; they are residue from an earlier iteration). They are reset,
+not deleted -- §6 puts the same local store under management.
+
+**Kept unchanged.** `domain/indices.py`, `domain/agronomy.py`, `domain/risk.py` — label-free
+published relationships with nothing fitted, never validated against `forward_z`, and therefore
+untouched by this result. They become the incumbent the learned layer must beat. `data/`,
+`features/agronomic.py` (the single shared feature builder), the `/predict` and `/outcomes`
+contracts.
+
+**Refactored, not rewritten.** `training/dataset.py` carries the Sentinel and Open-Meteo backfill,
+the 429 retry with backoff, the refuse-to-memoise-an-empty-result fix and the band cache namespace.
+All of that survives as `lab/panel.py`. Only `training/train.py` is decomposed.
+
+**Non-goals.** Field boundary polygons (`farms` stores points). A new geospatial foundation model.
+Replacing FastAPI, Postgres, the CI/deploy path or the nightly job. Any change to the Kotlin
+backend.
+
+## 4. The estimand
+
+Unit `i` is a field; time `t` is a 30-day bucket.
+
+| Stage | Definition | Removes |
+| --- | --- | --- |
+| 1 — exists | `z_it = (y_it - mu_{c(i),t}) / sigma_{c(i),t}` over cluster peers at date `t`, min 5 peers, field excluded | `gamma_t` |
+| 2 — new | `alphahat_it = shrink( mean_{s<t} z_is , m )`, expanding window, strictly prior | — |
+| Target | `ztilde_{i,t+1} = z_{i,t+1} - alphahat_it` | `alpha_i` |
+
+`alphahat` uses only observations strictly before `t`, so the existing leakage controls extend
+unchanged. It requires a minimum history of `m` prior observations; `m` is a swept hyperparameter,
+and fields below `m` are excluded from training and flagged at serving (§7).
+
+**Shrinkage.** With few prior observations `alphahat` is noisy, and subtracting a noisy estimate
+injects that noise into the target. `shrink` is an empirical-Bayes estimator pulling the field mean
+toward its cluster mean, with the shrinkage weight fitted on training folds only. `shrink` with
+weight 0 is the raw field mean, so the unshrunk case is a config value rather than a separate code
+path.
+
+**Frisch–Waugh–Lovell.** Residualising the target alone is not the within estimator; FWL requires
+demeaning both sides. `targets.py` therefore implements both variants and E02 runs them
+head-to-head:
+
+- `within_y` — target demeaned, features left in levels.
+- `within_xy` — target and the field-varying features both demeaned by their own prior field means.
+
+The difference between them is itself a reportable quantity: it measures how much of the covariates'
+apparent explanatory power was also a field effect.
+
+**Baselines under `ztilde`.** The zero predictor is climatology by construction, so the baseline that
+currently wins can no longer win by proxy. Persistence predicts `z_it - alphahat_it`. Majority and
+the seasonal control are retained. All four are recomputed inside every fold, as today.
+
+**First deliverable, before any model is fitted.** E01 reports the variance decomposition of
+`forward_z` into `Var(alpha_i)`, `Var(gamma_t)` and `Var(eps)` on the panel, with bootstrap
+intervals. If the field effect is the majority share, that single figure explains §1 and is the
+paper's central claim. It is a function over a parquet file and needs no training run.
+
+## 5. Data and unit of analysis
+
+Two populations, joined in one panel table.
+
+**Lattice sites** — the existing 122–185 Halton-sampled points across 4–6 bounding boxes. They
+supply statistical power and are what §1's numbers were measured on. They are not farms.
+
+**Registered farms** — `backend_schema.list_fields` already returns every farm with usable
+coordinates, reading `farms.latitude` / `farms.longitude` (the columns commit 95936ff corrected).
+Sentinel-2, Sentinel-1 and Open-Meteo history can be backfilled retrospectively for any point, so
+farm history is obtainable without waiting a season.
+
+Farms are held out as an **external validation set**, never used for selection. This follows the
+standard separation between blocked cross-validation for model selection and an independent set for
+the transferability claim.
+
+**Prerequisite task.** The farm count and geographic spread are not known from the repository. The
+implementation plan's first task is a read-only census: how many farms, in which states, with what
+coordinate spread. If the count is too small to support an external set, farms become a qualitative
+case study and the lattice stays primary — that branch is decided by the census, not assumed here.
+
+**Constraints carried forward, not solved.** `farms` stores points, not polygons, so the 500 m
+Sentinel-2 support mismatch persists and remains a stated limitation. The Niger Delta — where the
+registered farmers are — is humid forest with severe optical cloud loss, which promotes Sentinel-1
+from the additive role §9.1 E measured to a load-bearing one there.
+
+## 6. Lab architecture
+
+```
+src/argotech/lab/
+  panel.py      build the (field_id, bucket) panel; emit parquet + a manifest sidecar
+  targets.py    level_z | within_y | within_xy | delta_z; alphahat with shrinkage; min-history
+  splits.py     leave-one-cluster-out, forward chaining, buffered blocking
+  arms.py       zero, majority, persistence, climatology, linear, boosted, +presto, +radar
+  evaluate.py   net benefit, ranking with bootstrap CIs, ECE, conformal coverage, AOA
+  run.py        entrypoint: python -m argotech.lab.run experiments/E02.yaml
+experiments/
+  E01-variance-decomposition.yaml ... one file per experiment
+```
+
+Six modules, each independently testable, replacing one 684-line file that currently holds dataset
+loading, four arms, two split strategies, five metrics, a decision-rule sweep and a CLI.
+
+**An experiment is a config file, not a flag.** Each YAML declares the panel manifest hash, target,
+arms, splits, metrics and seed. `run.py` resolves it, executes it, and logs to MLflow: the resolved
+config, the git SHA, the data manifest hash, the seed, every fold metric, and the artifact.
+
+This closes a hole the repository already has. `docs/RESEARCH_SUMMARY.md` records that the README
+and two source files cite a metrics table — 0.760 and 0.377 over six folds on 6,957 samples — that
+exists in no committed file and is marked `[UNVERIFIED]`. Under this design, a number that cannot be
+traced to a run id cannot reach a document.
+
+**MLflow, local file store only.** `mlruns/` with the existing SQLite backend. No tracking server,
+no new infrastructure. It is used for two things the paper needs — run comparison across dozens of
+arms, and a model registry with stages — and for nothing else.
+
+**Panel manifest.** A JSON sidecar beside the parquet holding the content hash, row count, site
+count, cluster list, date range, and the code version that built it. An experiment records the hash
+it ran against, so a rebuilt panel produces a different hash and the mismatch is visible rather than
+silent. This is the controlled-comparison problem §9.1 E already ran into: the builder keys its
+window off `date.today()`, so two builds are not comparable.
+
+## 7. Evaluation and the release gate
+
+**Primary metric: net benefit.** Decision curve analysis (Vickers & Elkin 2006) evaluates a model by
+the consequences of acting on it, computed across the range of threshold probabilities, against
+visit-all and visit-none. It replaces the unresolved macro-F1-versus-precision@k standoff that
+`docs/model-design.md` §6 item 7 leaves as a decision "someone has to make consciously", and it
+subsumes the §9.1 D alert-rate sweep: the operating point becomes a reported curve rather than a
+constant chosen on principle.
+
+The promotion criterion needs no invented threshold: the candidate must achieve net benefit greater
+than or equal to the incumbent and both naive baselines -- where the incumbent is the currently
+registered production model, or, when no learned model is registered, the `domain/` agronomy alone **across the whole declared interval of
+cost ratios**, where the interval is recorded in `experiments/gate.yaml` and set by the product
+owner, not by the modeller.
+
+**Secondary metrics, all with intervals.** Precision@k and Spearman rho with bootstrap confidence
+intervals over folds. This is a correction, not an addition: §9.1 G reports a precision@25 seed
+spread of 0.14 on a metric computed over 25 items, and no interval currently accompanies any
+reported number.
+
+**Uncertainty.** Split-conformal intervals with weighted quantiles for non-exchangeable data
+(Barber, Candès, Ramdas & Tibshirani 2023). Weighting is required rather than optional here: blocked
+spatial folds and forward-chaining temporal folds both violate exchangeability by construction, so
+standard split conformal has no coverage guarantee in this protocol. Empirical coverage on held-out
+clusters is a hard gate.
+
+**Applicability.** The Area of Applicability (Meyer & Pebesma 2021) computes a dissimilarity index in
+predictor space and masks the region where cross-validated performance does not hold. This
+formalises the open question in `docs/RESEARCH_SUMMARY.md` §7 — "a field outside every rectangle
+gets no reference at all" — as a computed boolean rather than a caveat, and it is what makes the
+Niger Delta case explicit instead of silent.
+
+**Protocol.** Leave-one-cluster-out and forward chaining, both retained. Ploton et al. (2020)
+establishes that non-spatial validation is overoptimistic for this class of model; the honest
+counterweight, stated in the spec rather than discovered by a reviewer, is that four to six blocks
+estimate transferability with very few degrees of freedom. The farm external set is the response to
+that limitation.
+
+**Fairness.** The existing protected-attribute guard in `domain/risk.py` stands. Net benefit and
+ranking metrics are additionally sliced by household headship, landholding size and district, and a
+slice regression blocks promotion.
+
+**CI gate.** A single job: net benefit over the declared interval, conformal coverage within
+tolerance, no fairness-slice regression, AOA coverage reported. A model failing any of these does
+not promote, and the failure names which one.
+
+## 8. Serving
+
+The `/predict/farmer`, `/predict/crop-health` and `/outcomes` contracts are preserved. Three
+additions to the response:
+
+- `applicability` — whether the request falls inside the AOA.
+- `interval` — the conformal interval on the learned term.
+- `reference_status` — whether the field has the `m` prior observations `alphahat` requires.
+
+**Behaviour outside the AOA, or below minimum history: the learned term is withheld and the response
+falls back to the `domain/` agronomy alone**, labelled as such. This is the honest answer for a
+newly registered farm and for the Niger Delta, and it is strictly better than the current behaviour,
+which is an undefined peer anomaly flowing into a hazard term.
+
+`alphahat_i` is maintained per field by the nightly `jobs/precompute` run and stored on the
+`field_features` row, so the request path gains no query and no latency. The 48-hour freshness
+refusal in `store.is_fresh` covers it unchanged.
+
+**Artifact contract.** `models/registry.py` currently enforces which feature columns an artifact may
+require. It is extended to also declare required **per-field state** (`alphahat`, minimum history,
+AOA training-space summary). This generalises the guard that already exists because promoting the
+cluster-relative model would have raised a `KeyError` on the first live prediction — the same
+failure class, caught at test time rather than remembered.
+
+**Artifact format.** Export to ONNX, which removes the `scikit-learn==1.6.1` pin and the joblib
+internal-module-layout coupling documented in `pyproject.toml`. Already on the §7 "still to do"
+list; it is a precondition here because the registry pulls artifacts by version at startup rather
+than loading a pickle committed to git.
+
+## 9. The loop
+
+1. **Ingest** — nightly `jobs/precompute` writes `field_features` as today, and additionally appends
+   the night's observation to an append-only `panel` table. The training set accumulates as a side
+   effect of serving rather than as a backfill job.
+2. **Label** — `store.label_join` already pairs predictions with outcomes and is currently never
+   called. It becomes a scheduled job writing T1 and T2 outcomes into the panel. This is the single
+   change that makes the loop closed rather than drawn; `GET /outcomes/label-count` already exposes
+   the counter that decides when supervised targets become viable.
+3. **Train** — `lab.run` against the panel, every run logged.
+4. **Gate** — §7, in CI.
+5. **Register** — MLflow registry, staged, ONNX artifact.
+6. **Serve** — pull by version at startup.
+7. **Monitor** — per-feature drift (PSI), share of requests outside the AOA, conformal coverage
+   against realised outcomes, and the existing `degraded_rate` (share of fields with no cloud-free
+   scene). Because outcome labels arrive months late, these are the only near-real-time signals that
+   the model has broken.
+8. **Retrain** — triggered by label count crossing a threshold or by a drift alarm.
+
+## 10. Experiment schedule
+
+| Id | Question | Depends on |
+| --- | --- | --- |
+| E01 | How does `forward_z` variance split into field, date and residual components? | panel only |
+| E02 | Does `within_y` or `within_xy` beat the zero and persistence baselines where `level_z` did not? | E01 |
+| E03 | What minimum history `m` and shrinkage weight minimise held-out error on `alphahat`? | E02 |
+| E04 | Under the reformulated target, do radar and Presto still contribute nothing? | E02 |
+| E05 | Does the linear arm still beat the boosted arm out of cluster once the field effect is removed? | E02 |
+| E06 | What does the net benefit curve look like against visit-all and visit-none, and where does the model cross them? | E02 |
+| E07 | Does conformal coverage hold on held-out clusters, and does weighting fix it if plain split conformal fails? | E02 |
+| E08 | Does the result replicate on real registered farms as an external set? | farm census, E02 |
+
+E01 is a function over a parquet file and can be run before any refactor lands. If its answer is
+that the field effect is a small share of variance, the diagnosis in §2 is wrong and this design
+should be revised before implementation continues.
+
+## 11. Testing
+
+The existing runnable self-check style is kept; no new frameworks.
+
+- `test_targets.py` — `alphahat` uses no future data, verified on a synthetic panel with a planted
+  future spike that must not move any earlier estimate; `within_y` has approximately zero mean per
+  field over its own training window; a field below `m` yields no sample rather than a default.
+- `test_evaluate.py` — net benefit reproduces the known closed form on a hand-computed case; the
+  zero predictor scores exactly the visit-none reference.
+- `test_aoa.py` — a point far outside the training predictor space is masked out.
+- `test_artifact_contract.py` — extended: an artifact declaring per-field state it will not receive
+  fails at test time, not at first prediction.
+- `test_panel.py` — the manifest hash changes when the data changes and not when it does not.
+
+Existing leakage, feature, peer-statistic and end-to-end tests are retained unchanged.
+
+## 12. Risks
+
+- **The residual may be near-unpredictable.** Removing `alpha_i` may leave noise that weather and
+  agronomy cannot explain at this resolution. Given E01, that is a publishable result with a
+  mechanism rather than a failure, but it is the most likely outcome and is accepted in advance.
+- **Shrinkage introduces a fitted quantity into the target.** The weight is fitted on training folds
+  only; E03 must report sensitivity to it, because a target that moves with a hyperparameter invites
+  exactly the criticism this design is correcting.
+- **Few blocks.** Four to six spatial folds remain few, whatever the target. The farm external set
+  and reported intervals are the mitigation; they do not eliminate it.
+- **Farm population unknown.** §5 makes the census a blocking first task rather than an assumption.
+- **Support mismatch is unsolved.** Point coordinates, a 500 m satellite box, a ~9–25 km reanalysis
+  cell, and a per-farm advisory. This design does not close that gap and does not claim to.
+
+## 13. Sources
+
+| Design choice | Source |
+| --- | --- |
+| Cross-sectional demeaning removes time-invariant unit effects in crop-anomaly forecasting | Forecasting Crop Yield Anomalies on Panel Data via Spatially Demeaned Ensembles, *J. Agric. Biol. Environ. Stat.*, 2026. https://link.springer.com/article/10.1007/s13253-026-00743-8 |
+| Demeaning/detrending applied post hoc carries bias; estimate jointly | Comprehensive review of detrending methods for crop yields, *Field Crops Research*, 2026. https://www.sciencedirect.com/science/article/pii/S016819232600002X |
+| Residualising one side only is not the within estimator | Frisch & Waugh, *Econometrica* 1(4), 1933; Lovell, *JASA* 58(304), 1963 |
+| Evaluate by consequences of the decision, not by discrimination alone | Vickers & Elkin, Decision Curve Analysis, *Medical Decision Making* 26:565-574, 2006. https://journals.sagepub.com/doi/10.1177/0272989X06295361 |
+| Non-spatial CV is overoptimistic for spatially structured data | Ploton et al., *Nature Communications* 11, 2020. https://www.nature.com/articles/s41467-020-18321-y |
+| Masking the region where CV performance does not hold | Meyer & Pebesma, *Methods in Ecology and Evolution* 12, 1620–1633, 2021. https://besjournals.onlinelibrary.wiley.com/doi/full/10.1111/2041-210X.13650 |
+| Conformal intervals when exchangeability fails under shift | Barber, Candès, Ramdas & Tibshirani, *Annals of Statistics* 51(2), 816–845, 2023. https://projecteuclid.org/journals/annals-of-statistics/volume-51/issue-2/Conformal-prediction-beyond-exchangeability/10.1214/23-AOS2276.full |
+| Conformal prediction applied to Earth observation | Uncertainty quantification for probabilistic ML in Earth observation using conformal prediction, arXiv:2401.06421 |
+| Cross-validation design for real-world transferability of satellite vegetation models | Bringing cross-validation into the real world to evaluate transferability of satellite-based vegetation models, *Scientific Reports*, 2026. https://www.nature.com/articles/s41598-026-39866-w |
+| Frozen pretrained encoder for remote-sensing pixel timeseries (already vendored) | Tseng et al., Presto, arXiv:2304.14065 |
+| Vegetation Condition Index as the within-field reference | Kogan, 1990 (retained from `domain/indices.py`) |
+| Hazard x Exposure x Vulnerability risk framing | IPCC AR5/AR6 (retained from `domain/risk.py`) |
+
+## 14. What this design does not change
+
+The FastAPI service and its three contracts; the Kotlin backend and its schema; the nightly job's
+schedule and single-instance property; the CI deploy path and rollback-by-tag; the `domain/` layer;
+`features/agronomic.py` as the single feature builder shared by both paths; the protected-attribute
+guard.
