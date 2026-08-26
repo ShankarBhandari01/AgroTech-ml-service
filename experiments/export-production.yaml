@@ -1,0 +1,9 @@
+# Production export — python -m argotech.lab.export experiments/export-production.yaml
+#
+# Not an experiment: this config feeds `lab.export`, which fits `arm` on the WHOLE panel
+# (deliberately — see lab/export.py's module docstring) and writes the bundle
+# models/registry.py loads. `features` is omitted so it defaults to MODEL_FEATURES
+# (features/agronomic.py), the production feature set's one source of truth.
+name: export-production
+arm: boosted
+seed: 42
