@@ -25,12 +25,13 @@ Leakage control
   interval — so it needs no historical baseline that could carry future information.
 * The rainfall climatology used for `rain_anomaly_30` excludes the sample's own year.
 
-Run: `python -m argotech.training.dataset --sites 30 --years 4`
+Run: `python -m argotech.lab.panel --sites 30 --years 4`
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import statistics
 from concurrent.futures import ThreadPoolExecutor
@@ -324,6 +325,33 @@ def build_dataset(per_cluster: int = 30, years: int = 4, workers: int = 3) -> pd
     df = build_samples(collected)
     print(f"  {len(df)} labelled samples")
     return df
+
+
+def manifest(df: pd.DataFrame) -> dict:
+    """A content fingerprint for a panel, so a metric can name the data it was measured on.
+
+    Hashed over row-order-independent bytes: `build_samples` parallelises over sites, so two runs
+    of the same builder can emit the same rows in a different order. Order is not data.
+    """
+    canon = df.sort_values(list(df.columns)).reset_index(drop=True)
+    digest = hashlib.sha256(pd.util.hash_pandas_object(canon, index=False).values.tobytes())
+    return {
+        "content_hash": digest.hexdigest(),
+        "rows": len(df),
+        "sites": int(df["site_id"].nunique()),
+        "clusters": sorted(df["cluster"].dropna().unique().tolist()),
+        "date_min": str(df["obs_date"].min()),
+        "date_max": str(df["obs_date"].max()),
+    }
+
+
+def write_panel(df: pd.DataFrame, path) -> Path:
+    """Write the panel and its manifest side by side. Neither is useful without the other."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(path, index=False)
+    path.with_suffix(path.suffix + ".manifest.json").write_text(json.dumps(manifest(df), indent=2))
+    return path
 
 
 def main() -> None:

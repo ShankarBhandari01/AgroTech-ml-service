@@ -55,7 +55,7 @@ from argotech.features.agronomic import (
     cluster_stats,
     peer_stats,
 )
-from argotech.training.dataset import CLUSTERS, ELEVATED_Z, SEVERE_Z
+from argotech.lab.panel import CLUSTERS, ELEVATED_Z, SEVERE_Z
 
 PRODUCTION_ARTIFACT = Path("artifacts/agronomic_risk.joblib")
 EXPERIMENT_DIR = Path("artifacts/experimental")

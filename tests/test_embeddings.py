@@ -227,7 +227,7 @@ def test_a_failed_fetch_is_never_cached():
     import tempfile
     from pathlib import Path as _Path
 
-    from argotech.training.dataset import _cached_fetch
+    from argotech.lab.panel import _cached_fetch
 
     with tempfile.TemporaryDirectory() as d:
         path = _Path(d) / "site.json"
