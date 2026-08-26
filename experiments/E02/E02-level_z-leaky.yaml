@@ -1,0 +1,39 @@
+# E02 — does a two-way demeaned target carry signal the level target did not?
+#
+# The invalidating experiment. If neither within_y nor within_xy beats `zero` on net benefit with
+# non-overlapping intervals, the reformulated target carries no learnable signal at this resolution
+# and the recommendation becomes shipping the domain/ agronomy alone.
+#
+# Run all four kinds by editing `target` and re-running; each writes its own .result.json.
+name: E02-level_z-leaky
+target: level_z            # level_z | within_y | within_xy | delta_z
+features:
+  - ndvi_z_peer
+  - ndmi
+  - evi
+  - vci
+  - rvi_z_peer
+  - et0_90
+  - dry_spell_30
+  - dry_spell_90
+  - diurnal_range_30
+  - radiation_90
+  - rain_30
+  - rain_90
+  - rain_anomaly_30
+  - rh_mean_30
+  - water_deficit_30
+  - water_satisfaction_30
+  - heat_stress_days
+  - gdd_90
+  - stage_kc
+  - elevation
+arms: [zero, persistence, climatology, linear, boosted]
+splits: [spatial, temporal]
+min_history: 3
+shrink: 0.0
+tau: -1.0                   # the incumbent's severe cut, so an "event" means the same thing
+seed: 42
+peer_key: leaky         # leaky | cluster_month | geo_month
+lat_band: 20.0
+elev_band: 1000.0
