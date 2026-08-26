@@ -71,10 +71,16 @@ def fit_peer_stats(train: pd.DataFrame, kind: str, lat_band: float = 20.0,
 
 def apply_peer_z(df: pd.DataFrame, stats: dict, kind: str, lat_band: float = 20.0,
                   elev_band: float = 1000.0) -> tuple[pd.DataFrame, float]:
-    """Rewrite `ndvi_z_peer`/`rvi_z_peer` against `stats`, and report the share of rows that got one.
+    """Rewrite `ndvi_z_peer`/`rvi_z_peer` against `stats`, and report coverage across both.
 
     `stats` was fit elsewhere, on training rows only; this function looks a row's bucket up in it and
     never folds `df`'s own values back into the reference.
+
+    The returned coverage is OR semantics across `ndvi` and `rvi`: a row counts as covered if either
+    column found a bucket entry, not only if both did. `run.py` does not use this figure for the
+    reported `peer_coverage` metric — it computes its own `ndvi_z_peer`-specific coverage instead,
+    because `ndvi_z_peer` is the load-bearing feature and radar is additive-never-a-gate in this
+    codebase, so a fold where only `rvi` found a reference should not read as covered.
     """
     out = df.copy()
     keys = peer_key(df, kind, lat_band=lat_band, elev_band=elev_band)

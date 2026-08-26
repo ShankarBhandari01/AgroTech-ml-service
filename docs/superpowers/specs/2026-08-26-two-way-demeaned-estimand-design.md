@@ -293,6 +293,59 @@ slice regression blocks promotion.
 tolerance, no fairness-slice regression, AOA coverage reported. A model failing any of these does
 not promote, and the failure names which one.
 
+## 7a. The peer reference: fold-fitted, and what it costs to transfer
+
+`ndvi_z_peer`/`rvi_z_peer` are model *features*, not the estimand target §4 describes, but they had
+the same defect §2 diagnoses for the target, by a different route: `lab.panel.py` computed
+`peer_stats` once over the whole frame and baked the result in as a static column, keyed
+`cluster|MM` — calendar month pooled across all years, with no year boundary at all. 42 of the 45
+buckets span multiple years; `Benue_River_Basin|01` alone pools 2023-01-08 through 2026-01-22.
+Measured: across the lab's three forward-chaining boundaries, 74.0% / 49.9% / 24.3% of a training
+row's peer cohort lay at or after the boundary (max 94.2%); under leave-one-cluster-out, the held-out
+cluster's bucket drew from exactly one cluster — itself.
+
+`argotech.lab.peers` now fits the reference per fold. `fit_peer_stats` sees training rows only;
+`apply_peer_z` looks a row's bucket up in that fit, rewrites `ndvi_z_peer`/`rvi_z_peer` for both
+train and test, and reports `peer_coverage` — the share of rows that found a bucket — as a first-
+class fold metric, so a missing reference shows up in the record rather than silently defaulting.
+Three cohort keys are offered:
+
+- `leaky` — the pre-fix, whole-frame `panel.py` column, kept as the control that isolates how much
+  of any reported skill the leak itself supplied.
+- `cluster_month` — `cluster|MM`, fit honestly per fold. Cluster identity is exactly what a held-out
+  region cannot supply: coverage of each held-out cluster is `[0.0, 0.0, 0.0, 0.0]`. An honest
+  cluster-keyed fit leaves an unseen region with no reference at all — that is the correct answer,
+  not a bug, and it is what the Applicability gate above exists to surface rather than paper over.
+- `geo_month` — latitude/elevation bands in place of cluster identity, month unchanged. Coverage
+  recovers to `[1.0, 1.0, 1.0, 0.472]`; the shortfall is Kenya, the panel's only highland cluster
+  (1760 m mean), which borrows a reference only where its own sites fall below the 1000 m band.
+
+Widening the geographic bands trades specificity for transfer, and the trade is measured rather than
+assumed. Donor rows available to each held-out cluster (Benue 7.6°N/118 m, Kaduna 10.8°N/676 m, Kano
+12.0°N/455 m, Kenya 0.5°N/1760 m), by band width:
+
+| Band width | Benue | Kaduna | Kano | Kenya |
+| --- | --- | --- | --- | --- |
+| 5° / 500 m | 0 | 282 | 1098 | 0 |
+| 10° / 1000 m | 36 | 1353 | 1098 | 647 |
+| 20° / 1000 m | 2175 | 2799 | 1792 | 3139 |
+
+At 5°/500 m, two of four held-out clusters get no donors at all. At 20°/1000 m every cluster is
+fully served, but by then the key has stopped discriminating: the four clusters span only 0.5–12°N,
+so a 20° band no longer separates any of them by latitude, and the key degrades to
+elevation-and-month — pooling humid Benue with Sudan-savannah Kano, agroecologically distinct
+regimes a cluster key would never have pooled.
+
+A cohort tight enough to be agronomically meaningful — cluster identity, or a geographic band narrow
+enough to still discriminate climate — does not transfer to an unseen region at this sample size (122
+sites across 4 clusters); a band wide enough to transfer stops discriminating the thing the reference
+is meant to control for. No fixed band width is simply correct here, so `lat_band`/`elev_band` are
+swept experiment parameters (`experiments/E02-within-vs-level.yaml`), not a chosen constant. The
+Applicability paragraph above already cites `docs/RESEARCH_SUMMARY.md` §7's open question — "How
+should the reference cohort be defined so that it transfers to an unsampled region?" — as what the
+AOA formalises; this section is the beginning of an answer to it, not a resolution: a measured trade
+in place of an unexamined default.
+
 ## 8. Serving
 
 The `/predict/farmer`, `/predict/crop-health` and `/outcomes` contracts are preserved. Three
