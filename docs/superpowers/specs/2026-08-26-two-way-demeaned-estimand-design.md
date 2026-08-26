@@ -381,9 +381,11 @@ Existing leakage, feature, peer-statistic and end-to-end tests are retained unch
 - **The residual may be near-unpredictable.** Removing `alpha_i` may leave noise that weather and
   agronomy cannot explain at this resolution. Given E01, that is a publishable result with a
   mechanism rather than a failure, but it is the most likely outcome and is accepted in advance.
-- **Shrinkage introduces a fitted quantity into the target.** The weight is fitted on training folds
-  only; E03 must report sensitivity to it, because a target that moves with a hyperparameter invites
-  exactly the criticism this design is correcting.
+- **Shrinkage is a hand-set constant baked into the target, not a fitted quantity.** The weight is a
+  config value applied identically to every row before any split — arguably less defensible than
+  something fitted per fold, since it is the modeller's choice rather than data-driven. E03 must
+  report sensitivity to it, because a target that moves with a hyperparameter invites exactly the
+  criticism this design is correcting.
 - **Few blocks.** Four to six spatial folds remain few, whatever the target. The farm external set
   and reported intervals are the mitigation; they do not eliminate it.
 - **Farm population unknown.** §5 makes the census a blocking first task rather than an assumption.
