@@ -21,8 +21,11 @@ def _panel() -> pd.DataFrame:
         for k in range(6):
             for j in range(12):
                 level = (k - 2.5) * 0.5
+                obs = pd.Timestamp(f"2025-{j + 1:02d}-01")
                 rows.append({"site_id": f"C{c}-S{k}", "cluster": f"C{c}",
-                             "obs_date": f"2025-{j + 1:02d}-01",
+                             "obs_date": obs.strftime("%Y-%m-%d"),
+                             # 30-day outcome lag, matching the real panel exactly.
+                             "label_date": (obs + pd.Timedelta(days=30)).strftime("%Y-%m-%d"),
                              "ndvi_z_peer": level + rng.normal(0, 0.3),
                              "rain_30": rng.normal(50, 10),
                              "forward_z": level + rng.normal(0, 0.3)})
@@ -38,6 +41,8 @@ def test_a_result_names_the_data_the_seed_and_the_code():
     out = run_experiment(CFG, _panel())
     p = out["provenance"]
     assert len(p["content_hash"]) == 64 and p["seed"] == 42 and p["git_sha"]
+    assert isinstance(p["dirty"], bool)
+    assert p["scored_rows"] <= p["rows"]
 
 
 def test_every_arm_is_scored_in_every_fold():
@@ -72,3 +77,16 @@ def test_the_committed_e02_config_parses():
     cfg = load_config("experiments/E02-within-vs-level.yaml")
     assert cfg["target"] in ("level_z", "within_y", "within_xy", "delta_z")
     assert "zero" in cfg["arms"], "the zero predictor is the baseline E02 exists to beat"
+
+
+def test_both_split_protocols_produce_folds():
+    """E02 requests splits: [spatial, temporal]; nothing here exercised the temporal path.
+
+    `forward_chaining` needs `label_date` to cut the training side on outcome availability. A
+    fixture without that column cannot catch a regression in the protocol the real experiment runs.
+    """
+    out = run_experiment({**CFG, "splits": ["spatial", "temporal"]}, _panel())
+    kinds = {f["split"] for f in out["folds"]}
+    assert kinds == {"spatial", "temporal"}, f"missing a split protocol: {kinds}"
+    for fold in out["folds"]:
+        assert set(fold["arms"]) == set(CFG["arms"])

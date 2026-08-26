@@ -55,6 +55,21 @@ def _git_sha() -> str:
         return "unknown"
 
 
+def _git_dirty() -> bool:
+    """Whether the working tree differs from the recorded SHA.
+
+    Without this, `git_sha` names a commit that may not be the code that ran, and a number becomes
+    *falsely* traceable — worse than untraceable, because it can be cited with confidence. Flagged
+    rather than blocked: a research harness must be runnable on uncommitted work, it just must not
+    claim that work was committed.
+    """
+    try:
+        return subprocess.run(["git", "diff", "--quiet", "HEAD"],
+                               capture_output=True).returncode != 0
+    except (OSError, subprocess.SubprocessError):   # pragma: no cover
+        return True
+
+
 def _score_arm(arm, train, test, features, tau):
     """One arm on one fold: net benefit at the decision threshold, plus ranking diagnostics."""
     fitted = arm.fit(train, features)
@@ -103,8 +118,12 @@ def run_experiment(cfg: dict, df: pd.DataFrame) -> dict:
                                for m, v in per_fold.items()})
 
     return {"config": cfg,
-            "provenance": {"git_sha": _git_sha(), "seed": cfg["seed"],
-                            **{k: v for k, v in manifest(df).items()}},
+            "provenance": {"git_sha": _git_sha(), "dirty": _git_dirty(), "seed": cfg["seed"],
+                            # `manifest` describes the INPUT panel — the lineage anchor. `scored_rows`
+                            # is what `build_target` actually kept after dropping rows with no field
+                            # reference, and is the N that underlies every metric below.
+                            "scored_rows": len(frame),
+                            **manifest(df)},
             "folds": folds, "summary": summary}
 
 
