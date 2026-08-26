@@ -54,7 +54,9 @@ def load_config(path) -> dict:
     return cfg
 
 
-def _git_sha() -> str:
+def git_sha() -> str:
+    """Shared with `lab.export`, which writes provenance the same way — no cycle to avoid here,
+    unlike `lab.panel`'s own copy (it is imported *by* this module, so importing back would cycle)."""
     try:
         return subprocess.run(["git", "rev-parse", "--short", "HEAD"],
                                capture_output=True, text=True, check=True).stdout.strip()
@@ -62,7 +64,7 @@ def _git_sha() -> str:
         return "unknown"
 
 
-def _git_dirty() -> bool:
+def git_dirty() -> bool:
     """Whether the working tree differs from the recorded SHA.
 
     Without this, `git_sha` names a commit that may not be the code that ran, and a number becomes
@@ -247,7 +249,7 @@ def run_experiment(cfg: dict, df: pd.DataFrame) -> dict:
                                     min_history=cfg["min_history"], shrink=cfg["shrink"])[0])
 
     return {"config": cfg,
-            "provenance": {"git_sha": _git_sha(), "dirty": _git_dirty(), "seed": cfg["seed"],
+            "provenance": {"git_sha": git_sha(), "dirty": git_dirty(), "seed": cfg["seed"],
                             # `manifest` describes the INPUT panel — the lineage anchor.
                             "scored_rows": scored_rows,
                             **manifest(df)},

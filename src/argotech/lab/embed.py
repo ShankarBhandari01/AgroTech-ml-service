@@ -1,14 +1,14 @@
 """Precompute frozen Presto embeddings for every sample in the training set.
 
-Separate from `dataset.py` because it is a different kind of expensive: the dataset builder is
+Separate from `panel.py` because it is a different kind of expensive: the panel builder is
 network-bound against CDSE and Open-Meteo, this is CPU-bound against a 402K-parameter transformer.
 Keeping them apart means a modelling experiment can re-embed without re-fetching, which is the whole
 reason the upstream caches exist.
 
-Output is keyed on `(site_id, obs_date)` so `train.py` can merge it onto the sample frame without
-either file needing to know the other's row order.
+Output is keyed on `(site_id, obs_date)` so a modelling script can merge it onto the sample frame
+without either file needing to know the other's row order.
 
-Run: `python -m argotech.training.embed --data data/training_set.parquet`
+Run: `python -m argotech.lab.embed --data data/training_set.parquet`
 """
 
 from __future__ import annotations

@@ -412,7 +412,7 @@ argotech-ai/
 │   ├── features/               # feature schema + point-in-time builders
 │   ├── models/                 # estimators, fusion, registry/loading
 │   ├── serving/                # FastAPI app, routers, request/response schemas, pipeline
-│   └── training/               # dataset construction, training entrypoints
+│   └── lab/                    # panel construction, honest evaluation (run.py), artifact export
 └── tests/test_domain.py        # runnable self-check for the whole domain layer
 ```
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from argotech.features.agronomic import (
     CLUSTER_RELATIVE,
@@ -15,12 +16,6 @@ from argotech.features.agronomic import (
     MODEL_FEATURES,
     UNINFORMATIVE,
     add_cluster_relative,
-)
-from argotech.training.train import (
-    CLIM_COLUMN,
-    PRODUCTION_ARTIFACT,
-    add_site_climatology,
-    artifact_path,
 )
 
 
@@ -65,46 +60,18 @@ def test_cluster_relative_is_computed_within_fold_only():
     assert np.allclose(full[full.cluster == "A"][col].to_numpy(), alone[col].to_numpy())
 
 
-def test_site_climatology_uses_only_strictly_earlier_observations():
-    """z values are 0,1,2,3,4 per site, so the prior mean must be 0, 0, 0.5, 1, 1.5."""
-    out = add_site_climatology(_frame()).sort_values(["site_id", "obs_date"])
-    first_site = out[out.site_id == "A0"][CLIM_COLUMN].to_numpy()
-    assert np.allclose(first_site, [0.0, 0.0, 0.5, 1.0, 1.5])
-
-
-def test_site_climatology_preserves_row_order():
-    """It sorts internally; callers index into it positionally, so it must restore the order."""
-    df = _frame()
-    out = add_site_climatology(df)
-    assert out.index.equals(df.index)
-    assert out.site_id.tolist() == df.site_id.tolist()
-
-
 def test_model_features_drop_the_uninformative_and_add_the_twins():
     assert not (UNINFORMATIVE & set(MODEL_FEATURES))
     assert all(c + CZ_SUFFIX in MODEL_FEATURES for c in CLUSTER_RELATIVE)
     assert len(MODEL_FEATURES) == len(set(MODEL_FEATURES)), "duplicate feature name"
 
-
-def test_a_feature_set_serving_cannot_build_never_takes_the_production_path():
-    """The guard that stops a KeyError on the first live prediction.
-
-    Serving builds one row from FEATURE_COLUMNS and appends the `_cz` twins from the artifact's
-    cluster snapshot. A model wanting anything beyond that must not land where the registry will
-    load it.
-    """
-    from argotech.features.agronomic import FEATURE_COLUMNS
-
-    assert artifact_path(list(FEATURE_COLUMNS)) == PRODUCTION_ARTIFACT
-    assert artifact_path(FEATURE_COLUMNS[:5]) == PRODUCTION_ARTIFACT
-    # The twins became buildable when pipeline.py started deriving them; this is the assertion that
-    # inverted, and it is the point of that change rather than an accident of it.
-    assert artifact_path(MODEL_FEATURES) == PRODUCTION_ARTIFACT
-    assert artifact_path([*FEATURE_COLUMNS, "invented"]) != PRODUCTION_ARTIFACT
-    # A twin of a column not in CLUSTER_RELATIVE is still unbuildable: serving standardises exactly
-    # the 17 listed columns, so `_cz` is not a suffix serving can honour on demand.
-    assert artifact_path([*FEATURE_COLUMNS, "days_since_onset" + CZ_SUFFIX]) \
-        != PRODUCTION_ARTIFACT
+# `add_site_climatology`/`CLIM_COLUMN` (the site-climatology baseline) and `artifact_path` (the
+# unbuildable-feature guard) lived in the retired `training/train.py` and have no standalone
+# equivalent to repoint at: `lab.arms.Climatology` replaces the former, tested in
+# `tests/test_arms.py::test_climatology_collapses_onto_zero_under_the_reformulated_target` and
+# `test_climatology_is_a_real_predictor_under_the_level_target`; `lab.export.export_artifact`'s own
+# unbuildable-feature guard replaces the latter, tested in
+# `tests/test_export.py::test_export_rejects_a_feature_serving_cannot_build`.
 
 
 # ---------------------------------------------------------------------------------------------
@@ -226,29 +193,37 @@ def test_cohorts_reject_non_finite_peers():
 # Ranking metric
 # ---------------------------------------------------------------------------------------------
 
-def test_rank_correlation_sign_and_degenerate_cases():
-    """rho > 0 must mean "ranked the right way round".
+def test_spearman_sign_and_degenerate_cases():
+    """The retired `training.train.rank_correlation(risk, forward_z)` and `lab.evaluate.spearman`
+    are NOT the same function under a different name, so this is an adaptation, not a repoint:
 
-    The sign is the whole risk here: `forward_z` is an anomaly where *low* is bad while the risk
-    score runs the other way, so an unnegated Spearman would report a good model as a bad one and
-    quietly invert every comparison against the baselines.
+    * `rank_correlation` scored a decision-theoretic *risk* score against `forward_z`, negating the
+      target because risk runs opposite to the anomaly (low z = bad = high risk). `spearman` scores
+      a point-*prediction* of `ztilde` directly against `ztilde` itself — both in the same units, low
+      together on a good fit — so it does not negate. Confirmed by `lab/run.py`'s own call:
+      `spearman(pred, test["ztilde"])`, unnegated.
+    * `rank_correlation` returned NaN on a degenerate input (no ordering to measure). `spearman`
+      returns 0.0 instead — see its own docstring — matching `precision_at_k`'s same move on a tied
+      or constant score.
+    * `rank_correlation` rounded to 4 decimal places; `spearman` returns the raw float, so an exact
+      correlation compares with `pytest.approx` here rather than `==`.
+
+    Both are monotone-invariant and drop (rather than propagate) a NaN target; that much carries
+    over unchanged.
     """
-    import numpy as np
+    from argotech.lab.evaluate import spearman
 
-    from argotech.training.train import rank_correlation
+    truth = np.array([-2.0, -1.0, 0.0, 1.0, 2.0])   # ztilde: -2.0 is the worst-off field
+    perfect = truth.copy()                          # a perfect point-prediction of ztilde itself
+    assert spearman(perfect, truth) == pytest.approx(1.0)
+    assert spearman(-perfect, truth) == pytest.approx(-1.0)
 
-    z = np.array([-2.0, -1.0, 0.0, 1.0, 2.0])      # -2.0 is the worst-off field
-    perfect = np.array([5.0, 4.0, 3.0, 2.0, 1.0])  # ranks it most at risk
-    assert rank_correlation(perfect, z) == 1.0
-    assert rank_correlation(-perfect, z) == -1.0
+    # Monotone-invariant: rescaling the prediction must not move rho.
+    assert spearman(perfect * 100 + 7, truth) == pytest.approx(1.0)
 
-    # Monotone-invariant: rescaling the risk score must not move rho.
-    assert rank_correlation(perfect * 100 + 7, z) == 1.0
-
-    # An arm that scores every field the same has no ordering, so rho is undefined rather than 0.0 —
-    # 0.0 would read as "ranks no better than chance", which is a measurement, not an absence of one.
-    assert np.isnan(rank_correlation(np.zeros(5), z))
-    assert np.isnan(rank_correlation(np.array([1.0, 2.0]), np.array([1.0, 2.0])))   # n < 3
+    # A degenerate input (no ordering to measure) reads as "no better than chance", not "undefined".
+    assert spearman(np.zeros(5), truth) == 0.0
+    assert spearman(np.array([1.0, 2.0]), np.array([1.0, 2.0])) == 0.0   # n < 3
 
     # A NaN target is dropped, not propagated: forward_z is absent for a handful of rows.
-    assert rank_correlation(perfect, np.array([-2.0, -1.0, 0.0, 1.0, float("nan")])) == 1.0
+    assert spearman(perfect, np.array([-2.0, -1.0, 0.0, 1.0, float("nan")])) == pytest.approx(1.0)
