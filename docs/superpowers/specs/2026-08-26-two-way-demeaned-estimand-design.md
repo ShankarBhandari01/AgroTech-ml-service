@@ -365,6 +365,64 @@ For reference, the valid comparison — `level_z` net benefit, spatial / tempora
 `leaky`'s — the fold-fitted reference costs real skill relative to the whole-frame leak it replaces,
 which is the leak's own size, not a defect in the replacement.
 
+**[UNVERIFIED against the current code]** The `cluster_month` spatial figure above (−0.0019) does
+not reproduce under the harness as it stands today: `experiments/E02/E02-level_z-cluster_month`
+(git_sha `dd59159`) shows every spatial fold skipped (0/4 scored), not a scored negative number.
+97751bc ("Stop alpha_hat fabricating 0.0 when a fold has no peer reference at all") postdates
+whatever run produced −0.0019 and is the likely reason: before that fix, a fold with no peer
+reference silently fabricated `alpha_hat=0.0` rather than being dropped, which would produce a
+real-looking (if meaningless) scored number where the current, corrected code reports "no target
+could be built" instead. This paragraph's other five figures (`leaky` and `geo_month`, both
+splits) do reproduce exactly against `experiments/E02/` — see that directory's README. Left as-is
+here rather than silently edited, since resolving which number is right is outside this task's
+scope; a reader citing `cluster_month`/spatial from this paragraph should use `experiments/E02/`
+instead.
+
+### Band sweep: what widening `lat_band`/`elev_band` actually buys and costs
+
+Measured (`experiments/E04-band-sweep/`, `git_sha=dd59159`, `seed=42`, spatial folds,
+`peer_key=geo_month`): `lat_band x elev_band` swept over `{5, 10, 20, 90} x {500, 1000, 2000}` on
+both `level_z` and `within_xy`.
+
+**Latitude stops discriminating at 20°, exactly, not approximately.** `lat_band=20` and
+`lat_band=90` produce bit-identical net benefit, CI, donor-row counts and per-cluster coverage in
+every one of 48 checked (cell x target x arm) rows. All four cluster mean latitudes (Benue 7.6°N,
+Kaduna 10.8°N, Kano 12.0°N, Kenya 0.5°N) satisfy `floor(lat/20) == floor(lat/90) == 0`, so from 20°
+up the key is `elevation-and-month` alone — confirming numerically what this section's paragraph
+above already states from inspection of the band width.
+
+**The binding constraint at every band width is Kenya's coverage, not Benue's or Kano's.** At
+`elev_band=500` (lat >= 20), Benue/Kaduna/Kano each reach 0.86-1.00 peer coverage; Kenya sits at
+0.25 — its 1760 m mean elevation is the outlier against the other three clusters' 118-676 m. Kenya
+coverage rises 0.25 -> 0.47 -> 0.55 as `elev_band` widens 500 -> 1000 -> 2000, and net benefit
+falls as it does: `within_xy`/`linear` (the arm carrying the +0.0404 result) goes
++0.0567 -> +0.0404 -> +0.0235; `boosted` goes +0.0296 -> +0.0218 -> +0.0186. Every point of Kenya
+coverage bought past 500 m costs net benefit somewhere on the curve — a measured trade, not an
+assumed one. Below 20°/500 m, tight bands can zero out coverage for *both* extreme-latitude
+clusters at once (Benue and Kenya both reach 0 donor rows at 5-10°/500 m), collapsing
+leave-one-cluster-out from 4 scored folds to 2.
+
+**A thin donor pool can manufacture a spurious-looking peak.** `within_xy`/`linear` at
+`10°/1000 m` reports net benefit +0.1580 — nominally the highest number in the sweep, well above
+`20°/1000 m`'s +0.0404 — but it is a 4-fold mean dominated by one degenerate fold: Benue, whose
+donor pool at that band is only 36 rows, scores net benefit +0.5989 with an event rate of 88.2%
+(every other fold in the same run: 4-21%). A peer reference fit on 36 rows is a noisy, plausibly
+biased estimate; applying it appears to have pushed nearly all of Benue's held-out rows below the
+event threshold, and net benefit under a near-universal event rate is close to its ceiling almost
+by construction. The 4-fold mean's own CI, [-0.0036, +0.4492], crosses zero and is wide enough that
+this was reportable as a fold-level artifact rather than a genuine transfer improvement only
+because per-fold values were inspected, not just the mean — see `experiments/E04-band-sweep/README.md`
+Finding 3.
+
+**Where the trade turns.** Coverage is "complete enough" (3 of 4 clusters >= 0.86, Kenya the only
+partial one) starting at `20°/500 m`, which is also this sweep's highest defensible net benefit
+(`within_xy` linear +0.0567). `20°/1000 m` — the width this investigation shipped — trades −0.0163
+net benefit for +0.22 Kenya coverage (0.25 -> 0.47); `20°/2000 m` trades another −0.0169 for
+another +0.08. `20°/1000 m` is not the point of maximum net benefit in this sweep; it is the point
+past which every further coverage gain keeps costing net benefit, which is what a band width
+argued from first principles ("the coarsest option that reaches every held-out cluster") should be
+expected to be, and now is: measured, not assumed.
+
 ## 8. Serving
 
 The `/predict/farmer`, `/predict/crop-health` and `/outcomes` contracts are preserved. Three

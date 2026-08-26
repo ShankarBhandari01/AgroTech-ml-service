@@ -1,0 +1,38 @@
+name: E04-level_z-lat5-elev1000
+target: level_z
+features:
+- ndvi_z_peer
+- ndmi
+- evi
+- vci
+- rvi_z_peer
+- et0_90
+- dry_spell_30
+- dry_spell_90
+- diurnal_range_30
+- radiation_90
+- rain_30
+- rain_90
+- rain_anomaly_30
+- rh_mean_30
+- water_deficit_30
+- water_satisfaction_30
+- heat_stress_days
+- gdd_90
+- stage_kc
+- elevation
+arms:
+- zero
+- persistence
+- climatology
+- linear
+- boosted
+splits:
+- spatial
+min_history: 3
+shrink: 0.0
+tau: -1.0
+seed: 42
+peer_key: geo_month
+lat_band: 5.0
+elev_band: 1000.0
