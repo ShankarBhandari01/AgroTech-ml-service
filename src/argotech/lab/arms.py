@@ -1,9 +1,11 @@
 """Every arm behind one interface: fit on a training frame, predict `ztilde` on a test frame.
 
 The baselines are arms rather than special cases because the whole argument turns on comparing
-against them honestly. Under the reformulated target `climatology` collapses onto `zero` by
-construction, which is the point: the baseline that beat the incumbent can no longer win by
-supplying a field effect the target left in.
+against them honestly. `climatology` is a real fitted arm — each field's mean `ztilde` over
+training — not a stand-in for `zero`. Under the reformulated target it converges on the zero
+predictor as a MEASURED consequence of the target having removed the field effect, which is the
+point: the baseline that beat the incumbent can no longer win that comparison by supplying a field
+effect the target left in.
 
 Regressors, not classifiers. `ztilde` is continuous; the three-class discretisation in the
 incumbent existed to serve a control classifier and is not carried over.
@@ -36,17 +38,46 @@ class Arm:
 
 
 class Zero(Arm):
-    """Predict no deviation from the field's own norm. Climatology, under this target."""
+    """Predict no deviation from the field's own norm.
+
+    What `climatology` converges to once `ztilde` has actually removed the field effect — see
+    `Climatology` below for why that arm is fitted rather than this one reused by name.
+    """
 
     def _predict(self, test, features):
         return np.zeros(len(test))
 
 
-class Persistence(Arm):
-    """Carry the field's current within-deviation forward."""
+class Climatology(Arm):
+    """Each field's mean `ztilde` over the TRAINING rows, carried forward.
+
+    "Is this field usually weak", as opposed to persistence's "is it weak right now". Under
+    `level_z` this is the baseline that beat the incumbent model (docs/model-design.md §9.1 A),
+    which is why it must be a real fitted quantity rather than a constant: a hardcoded zero would
+    make that comparison a strawman.
+
+    Under a correct within-transform it converges on the zero predictor — but as a MEASURED
+    consequence of the target having removed the field effect, not by construction. That is what
+    makes the equivalence test in test_arms.py meaningful.
+    """
+
+    def _fit(self, train, features):
+        self.means = train.groupby("site_id")["ztilde"].mean()
+        # A site absent from training has no history; the training mean is the neutral answer.
+        self.default = float(train["ztilde"].mean())
 
     def _predict(self, test, features):
-        return (test["ndvi_z_peer"] - test["alpha_hat"]).fillna(0.0).to_numpy()
+        return test["site_id"].map(self.means).fillna(self.default).to_numpy(dtype=float)
+
+
+class Persistence(Arm):
+    """Carry the field's current reading forward, in whatever units `ztilde` is: `persistence_pred`
+    is defined per target kind in `targets.build_target` because "current reading" means a
+    different quantity for each estimand.
+    """
+
+    def _predict(self, test, features):
+        return test["persistence_pred"].to_numpy(dtype=float)
 
 
 class Sklearn(Arm):
@@ -86,14 +117,21 @@ def _boosted(seed: int) -> Arm:
     """
     return Sklearn(HistGradientBoostingRegressor(
         max_iter=300, learning_rate=0.06, max_depth=None, min_samples_leaf=25,
-        l2_regularization=1.0, early_stopping=True, validation_fraction=0.15,
+        l2_regularization=1.0,
+        # sklearn's internal early-stopping split is IID-random within whatever training frame it
+        # gets. The outer protocol (splits.py) is spatially blocked and forward-chained in time; a
+        # random 15% here can put a site's temporally-adjacent rows on both sides of the internal
+        # split, so the stopping iteration would be chosen on leaked, autocorrelated signal inside
+        # a protocol whose entire purpose is blocking that. It would also make this arm's comparison
+        # against linear (no internal split at all) unfair. Refused: run the full max_iter instead.
+        early_stopping=False,
         random_state=seed))
 
 
 ARMS = {
     "zero": lambda seed: Zero(),
     "persistence": lambda seed: Persistence(),
-    "climatology": lambda seed: Zero(),
+    "climatology": lambda seed: Climatology(),
     "linear": _linear,
     "boosted": _boosted,
 }
@@ -105,7 +143,16 @@ def resid_sd(arm: Arm, train: pd.DataFrame, features: list[str]) -> float:
     Deliberately in-sample and deliberately simple: it is a scale for the normal CDF in
     `evaluate.prob_event`, not an uncertainty claim. Distribution-free intervals with a coverage
     guarantee are conformal's job and are out of scope for this plan.
+
+    Raises rather than substituting a placeholder scale on a degenerate fit: a fallback of 1.0 would
+    be indistinguishable downstream from a genuine spread of 1.0, and this repository exists to stop
+    publishing numbers it cannot stand behind — a degenerate fold should abort a run, not score it.
     """
     resid = train["ztilde"].to_numpy() - arm.predict(train, features)
     sd = float(np.nanstd(resid))
-    return sd if np.isfinite(sd) and sd > 0 else 1.0
+    if not np.isfinite(sd) or sd <= 0:
+        raise ValueError(
+            f"{type(arm).__name__}: residual spread is {sd!r}. A degenerate fit cannot be turned "
+            "into event probabilities; returning a placeholder scale would produce smooth, "
+            "plausible, meaningless numbers.")
+    return sd

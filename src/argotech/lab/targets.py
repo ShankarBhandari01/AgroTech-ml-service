@@ -64,11 +64,17 @@ def _within(df: pd.DataFrame, columns: list[str], unit: str) -> pd.DataFrame:
 
 def build_target(df: pd.DataFrame, kind: str, features: list[str], unit: str = "site_id",
                  min_history: int = 0, shrink: float = 0.0) -> tuple[pd.DataFrame, list[str]]:
-    """Attach `alpha_hat` and `ztilde`, drop rows with no reference, and name the arm's features.
+    """Attach `alpha_hat`, `ztilde` and `persistence_pred`, drop rows with no reference, and name the
+    arm's features.
 
     Returns (frame, feature_names). `within_xy` hands back demeaned feature names; every other kind
     hands back `features` unchanged. Residualising the target alone is *not* the within estimator —
     FWL requires demeaning both sides — so the two are separate kinds and E02 runs them head to head.
+
+    `persistence_pred` is "carry the current reading forward", but what that means depends on what
+    `ztilde` is: the field's raw level under `level_z`, its within-deviation under `within_y` /
+    `within_xy`, and "no change" — 0.0 — under `delta_z`, whose target is already a difference. It
+    lives here rather than in the arm because it is a property of the estimand, not of the model.
     """
     if kind not in TARGET_KINDS:
         raise ValueError(f"unknown target kind {kind!r}; expected one of {TARGET_KINDS}")
@@ -78,16 +84,20 @@ def build_target(df: pd.DataFrame, kind: str, features: list[str], unit: str = "
 
     if kind == "level_z":
         out["ztilde"] = out["forward_z"]
+        out["persistence_pred"] = out["ndvi_z_peer"]
         names = list(features)
     elif kind == "within_y":
         out["ztilde"] = out["forward_z"] - out["alpha_hat"]
+        out["persistence_pred"] = out["ndvi_z_peer"] - out["alpha_hat"]
         names = list(features)
     elif kind == "within_xy":
         out = pd.concat([out, _within(out, features, unit)], axis=1)
         out["ztilde"] = out["forward_z"] - out["alpha_hat"]
+        out["persistence_pred"] = out["ndvi_z_peer"] - out["alpha_hat"]
         names = [c + WITHIN_SUFFIX for c in features]
-    else:  # delta_z — the first difference; persistence collapses to the zero predictor
+    else:  # delta_z — the first difference; persistence predicts no change
         out["ztilde"] = out["forward_z"] - out["ndvi_z_peer"]
+        out["persistence_pred"] = 0.0
         names = list(features)
 
     # alpha_hat stays in the required subset even for level_z, whose ztilde never touches it: this

@@ -130,3 +130,20 @@ def test_every_declared_kind_builds():
     for kind in TARGET_KINDS:
         out, feats = build_target(df, kind, features=["ndvi_z_peer"], min_history=2)
         assert "ztilde" in out.columns and len(out) > 0 and feats
+
+
+def test_persistence_pred_is_the_right_quantity_per_target_kind():
+    """"Carry the current reading forward" means a different quantity per estimand: the raw level
+    under level_z, the within-deviation under within_y/within_xy, and "no change" under delta_z,
+    whose target is already a difference."""
+    df = _panel()
+
+    level, _ = build_target(df, "level_z", features=["ndvi_z_peer"], min_history=2)
+    assert np.allclose(level["persistence_pred"], level["ndvi_z_peer"])
+
+    for kind in ("within_y", "within_xy"):
+        out, _ = build_target(df, kind, features=["ndvi_z_peer"], min_history=2)
+        assert np.allclose(out["persistence_pred"], out["ndvi_z_peer"] - out["alpha_hat"]), kind
+
+    delta, _ = build_target(df, "delta_z", features=["ndvi_z_peer"], min_history=0)
+    assert np.allclose(delta["persistence_pred"], 0.0)
