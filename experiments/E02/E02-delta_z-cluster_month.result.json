@@ -44,8 +44,8 @@
     "elev_band": 1000.0
   },
   "provenance": {
-    "git_sha": "dd59159",
-    "dirty": false,
+    "git_sha": "22b90ed",
+    "dirty": true,
     "seed": 42,
     "scored_rows": 4596,
     "content_hash": "6c832dc2741766af8a74b5fd2dd39cab4d4557fdba811ecc728a8a6b8bf28aeb",
@@ -59,7 +59,7 @@
     ],
     "date_min": "2022-09-10",
     "date_max": "2026-06-21",
-    "code_version": "dd59159"
+    "code_version": "22b90ed"
   },
   "folds": [
     {
