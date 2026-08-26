@@ -36,7 +36,9 @@ def alpha_hat(df: pd.DataFrame, column: str = "ndvi_z_peer", unit: str = "site_i
     unshrunk `alpha_hat` removes only 19.9% of it. The ~15-point gap is this estimator's own noise.
 
     Rows with fewer than `min_history` prior observations get NaN — they have no reference, and a
-    default of 0.0 would assert "exactly average" about a field nothing is known of.
+    default of 0.0 would assert "exactly average" about a field nothing is known of. `min_history=0`
+    and `min_history=1` behave identically: a row with zero prior observations has weight 0 regardless,
+    so without an implicit floor of 1 it would silently compute 0.0 * nan = 0.0 rather than NaN.
     """
     order = df.sort_values([unit, "obs_date"]).index
     d = df.loc[order]
@@ -88,5 +90,8 @@ def build_target(df: pd.DataFrame, kind: str, features: list[str], unit: str = "
         out["ztilde"] = out["forward_z"] - out["ndvi_z_peer"]
         names = list(features)
 
+    # alpha_hat stays in the required subset even for level_z, whose ztilde never touches it: this
+    # keeps row counts identical across level_z / within_y / within_xy so E02 compares arms on the
+    # same sample, not on samples of different sizes.
     required = ["ztilde"] + ([] if kind == "delta_z" else ["alpha_hat"])
     return out.dropna(subset=required).reset_index(drop=True), names

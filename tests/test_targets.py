@@ -37,6 +37,24 @@ def test_alpha_hat_never_sees_the_future():
         "a future observation moved an earlier alpha_hat: the estimator leaks"
 
 
+def test_alpha_hat_excludes_the_current_rows_own_value():
+    """The same-row check: perturbing row j must not move row j's own estimate.
+
+    The sibling test above spikes a site's LAST row, so it only pins that the future cannot
+    rewrite the past. Deleting `.shift(1)` — which puts today's value into today's mean — passes
+    that test and every other one in this file. This is the test that fails when it is deleted.
+    """
+    df = _panel()
+    before = alpha_hat(df, min_history=1)
+    for row in (5, 12, 27):                       # mid-history rows, each with a real prior window
+        perturbed = df.copy()
+        perturbed.loc[df.index[row], "ndvi_z_peer"] = 999.0
+        after = alpha_hat(perturbed, min_history=1)
+        assert before.iloc[row] == after.iloc[row], (
+            f"row {row}: alpha_hat moved when that row's OWN value changed — "
+            "the estimate includes the current observation")
+
+
 def test_first_observation_has_no_reference():
     df = _panel()
     first = df.groupby("site_id").head(1).index
