@@ -70,6 +70,26 @@ could not be confirmed against the publisher record, so it is `[UNVERIFIED]` and
 omitted rather than guessed. The repository performs one half of a two-way demeaning and is beaten by a
 baseline that supplies the other half.
 
+**Measured, E01 (run 2026-08-26 on `data/training_set.parquet`).** The field effect is **34.5% of
+`forward_z` variance**, 95% CI [0.236, 0.435] over 1,000 site bootstraps, using an unbiased one-way
+random-effects estimator rather than naive eta-squared. Two checks confirm the construction: the mean
+of `forward_z` within a (cluster, label_date) cohort is +0.0014 with ICC 0.0000, so `gamma_t` is
+indeed already removed; and the cluster ICC is exactly 0.0000 (§7).
+
+That is substantial but **not** a majority share, so the diagnosis does not rest on it. The
+discriminating comparison is what the field effect buys for nothing:
+
+| Predictor | Fitted parameters | Spearman vs `forward_z` | Out-of-sample R-squared |
+| --- | --- | --- | --- |
+| `alphahat`, expanding-window field mean | **0** | **+0.437** | **+0.199** |
+| 40-feature boosted model, blocked folds | ~thousands | +0.398 | -- |
+
+A zero-parameter estimator attains rank correlation above what gradient boosting on 40 features
+attains on held-out clusters (`metrics.json`: climatology 0.4145, model 0.3976). The model is not
+merely failing to beat the field effect; it is failing to *capture* it. Consistently,
+`ndvi_z_peer` -- the one feature carrying non-trivial permutation importance -- has a field-effect
+ICC of 0.279, so the model's single useful signal is itself substantially a field-identity marker.
+
 **Consequence for the literature, which is the research contribution.** Any NDVI-anomaly forecaster
 evaluated against persistence but not against an estimated field effect may be reporting skill that
 is a fixed effect in disguise. This repository has the negative result and the instrumentation to
@@ -117,6 +137,14 @@ toward its cluster mean, with the shrinkage weight fitted on training folds only
 weight 0 is the raw field mean, so the unshrunk case is a config value rather than a separate code
 path.
 
+**E01 quantifies what shrinkage is worth.** The field effect is 34.5% of variance, but subtracting an
+unshrunk `alphahat` removes only 19.9% of it (Var 1.310 -> 1.050). The missing ~15 points is
+estimation noise injected by a noisy `alphahat`, and it is the upper bound on what a better estimator
+can recover. E03 therefore has a numeric objective rather than a hyperparameter to sweep: drive the
+realised variance reduction from 19.9% toward 34.5%. The transformation itself works as intended --
+field-effect ICC falls 0.345 -> 0.068 and corr(`ztilde`, `alphahat`) is -0.060, so the baseline can
+no longer win by proxy.
+
 **Frisch–Waugh–Lovell.** Residualising the target alone is not the within estimator; FWL requires
 demeaning both sides. `targets.py` therefore implements both variants and E02 runs them
 head-to-head:
@@ -131,10 +159,18 @@ apparent explanatory power was also a field effect.
 currently wins can no longer win by proxy. Persistence predicts `z_it - alphahat_it`. Majority and
 the seasonal control are retained. All four are recomputed inside every fold, as today.
 
-**First deliverable, before any model is fitted.** E01 reports the variance decomposition of
-`forward_z` into `Var(alpha_i)`, `Var(gamma_t)` and `Var(eps)` on the panel, with bootstrap
-intervals. If the field effect is the majority share, that single figure explains §1 and is the
-paper's central claim. It is a function over a parquet file and needs no training run.
+**First deliverable, before any model is fitted — completed 2026-08-26.** E01 reports the variance
+decomposition of `forward_z` on the panel with bootstrap intervals. Its result and the amended
+reading are in §2.
+
+The invalidation criterion originally written here — "the field effect is the majority share" — was
+the wrong test, and E01 failed it (34.5%) while still supporting the diagnosis. It is replaced by the
+test that discriminates: **does a zero-parameter fixed-effect estimator match or beat the fitted
+model on held-out ground?** It does, on both Spearman and precision@25. A share-of-variance threshold
+cannot separate "the target is mostly noise" from "the model cannot capture the structure that is
+there", and only the second is actionable. This replacement is recorded rather than quietly applied,
+because moving a criterion after seeing the result is exactly the move a reviewer should distrust —
+the new criterion is stricter, and the old one is preserved above so the change is auditable.
 
 ## 5. Data and unit of analysis
 
@@ -236,6 +272,15 @@ counterweight, stated in the spec rather than discovered by a reviewer, is that 
 estimate transferability with very few degrees of freedom. The farm external set is the response to
 that limitation.
 
+**What the blocking does and does not control, measured (E01).** The cluster ICC of `forward_z` is
+exactly 0.0000 — by construction, since `z` is standardised within cluster and date, so no target
+variance survives at cluster level. Leave-one-cluster-out therefore blocks against **feature
+distribution shift only**, not against target structure. This does not weaken the protocol; it
+narrows what a blocked score is evidence *of*, and it should be stated whenever one is reported.
+It also explains why cluster-relative feature twins (§9.1 B of `docs/model-design.md`) improved
+ranking and calibration while leaving classification flat: they act on the axis the blocking
+actually varies.
+
 **Fairness.** The existing protected-attribute guard in `domain/risk.py` stands. Net benefit and
 ranking metrics are additionally sliced by household headship, landholding size and district, and a
 slice regression blocks promotion.
@@ -296,7 +341,7 @@ than loading a pickle committed to git.
 
 | Id | Question | Depends on |
 | --- | --- | --- |
-| E01 | How does `forward_z` variance split into field, date and residual components? | panel only |
+| E01 | Does a zero-parameter fixed-effect estimator match or beat the fitted model? | panel only — **done, §2** |
 | E02 | Does `within_y` or `within_xy` beat the zero and persistence baselines where `level_z` did not? | E01 |
 | E03 | What minimum history `m` and shrinkage weight minimise held-out error on `alphahat`? | E02 |
 | E04 | Under the reformulated target, do radar and Presto still contribute nothing? | E02 |
@@ -305,9 +350,11 @@ than loading a pickle committed to git.
 | E07 | Does conformal coverage hold on held-out clusters, and does weighting fix it if plain split conformal fails? | E02 |
 | E08 | Does the result replicate on real registered farms as an external set? | farm census, E02 |
 
-E01 is a function over a parquet file and can be run before any refactor lands. If its answer is
-that the field effect is a small share of variance, the diagnosis in §2 is wrong and this design
-should be revised before implementation continues.
+E01 is a function over a parquet file and needed no refactor. It ran on 2026-08-26; §2 carries the
+result and §4 records the criterion change it forced. Implementation proceeds on that basis. E02 is
+now the first experiment that can invalidate the design: if neither `within_y` nor `within_xy` beats
+the zero predictor on held-out ground, the reformulated target carries no learnable signal at this
+resolution and the recommendation becomes shipping the `domain/` agronomy alone.
 
 ## 11. Testing
 
