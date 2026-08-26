@@ -213,6 +213,7 @@ def run_experiment(cfg: dict, df: pd.DataFrame) -> dict:
     for split_name in cfg["splits"]:
         split_folds = [f for f in folds if f["split"] == split_name]
         scored_folds = [f for f in split_folds if f["arms"]]
+        skipped_folds = [f for f in split_folds if not f["arms"]]
         summary[split_name] = {}
         if not scored_folds:
             # Every fold in this split was skipped — an empty summary would look like a real (if
@@ -228,6 +229,13 @@ def run_experiment(cfg: dict, df: pd.DataFrame) -> dict:
             # shape (and every consumer of it) stays exactly as it was. Averaged over every fold
             # in the split, skipped ones included: their (typically 0.0) coverage is real signal.
             s["peer_coverage_mean"] = float(np.nanmean([f["peer_coverage"] for f in split_folds]))
+            # A partially-skipped split must not average its survivors and print as if nothing were
+            # lost: `folds_scored`/`folds_attempted` travel with every arm's numbers (same
+            # per-arm-duplication as peer_coverage_mean above), and `skipped_folds` names which ones
+            # were dropped and why, so a 2-of-4-cluster result can never be read as a 4-cluster one.
+            s["folds_scored"] = len(scored_folds)
+            s["folds_attempted"] = len(split_folds)
+            s["skipped_folds"] = [{"fold": f["fold"], "reason": f["skipped"]} for f in skipped_folds]
             summary[split_name][name] = s
 
     # Descriptive only, not used for scoring: how many rows in the raw panel have enough field
@@ -276,20 +284,40 @@ def main(argv=None) -> int:
             for split_name, split_summary in result["summary"].items():
                 for arm, s in split_summary.items():
                     mlflow.log_metrics({f"{split_name}.{arm}.{k}": v for k, v in s.items()
-                                         if not k.endswith("_ci")})
+                                         if not k.endswith("_ci") and k != "skipped_folds"})
             mlflow.log_artifact(str(out))
     except ImportError:  # pragma: no cover — mlflow lives in the `train` extra
         print("mlflow not installed; results written to disk only", file=sys.stderr)
 
     print(f"{out}\n")
     for split_name, split_summary in result["summary"].items():
+        split_folds = [f for f in result["folds"] if f["split"] == split_name]
+        skipped = [f for f in split_folds if f.get("skipped")]
+        if not split_summary:
+            # Every fold in this split was skipped: say so instead of printing a bare, empty header
+            # that a reader could mistake for "this split just wasn't run".
+            print(f"[{split_name}]  0/{len(split_folds)} folds scored — every fold was skipped:")
+            for f in skipped:
+                print(f"    {f['fold']}: {f['skipped']}")
+            print()
+            continue
         print(f"[{split_name}]")
         for arm, s in sorted(split_summary.items(), key=lambda kv: -kv[1]["net_benefit_mean"]):
             lo, hi = s["net_benefit_ci"]
             print(f"  {arm:<14} NB {s['net_benefit_mean']:+.4f} [{lo:+.4f}, {hi:+.4f}]"
                   f"   P@25 {s['precision_at_25_mean']:.3f}"
                   f"   rho {s['spearman_mean']:+.3f}"
-                  f"   peer_coverage {s['peer_coverage_mean']:.3f}")
+                  f"   peer_coverage {s['peer_coverage_mean']:.3f}"
+                  f"   folds {s['folds_scored']}/{s['folds_attempted']}")
+        if skipped:
+            # A PARTIALLY skipped split: the averaged numbers above are real, but they are an
+            # average over the survivors, not over every fold the protocol attempted — say which
+            # ones were dropped and why, right next to the numbers a reader would otherwise cite
+            # as e.g. "4-cluster leave-one-cluster-out" when only 2 clusters actually scored.
+            print(f"  ({len(skipped)}/{len(split_folds)} folds skipped:")
+            for f in skipped:
+                print(f"    {f['fold']}: {f['skipped']}")
+            print("  )")
         print()
     return 0
 

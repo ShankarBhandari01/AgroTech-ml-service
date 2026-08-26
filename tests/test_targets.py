@@ -77,6 +77,18 @@ def test_alpha_hat_recovers_the_planted_field_effect():
     assert np.allclose(got.to_numpy(), [-1.5, -0.5, 0.5, 1.5], atol=0.05)
 
 
+def test_alpha_hat_is_nan_not_zero_when_a_field_has_no_reference_at_all():
+    """Regression: a fold with zero peer coverage makes `ndvi_z_peer` 100% NaN. Before the fix,
+    `prior_n` (cumcount()) counted rows regardless of whether their value was NaN, so `prior_n > 0`
+    still gave weight 1 against a `fillna(0.0)`-coerced mean — fabricating exactly the "0.0 asserts
+    average about a field nothing is known of" this function's own docstring refuses. A column
+    with no reference anywhere must yield `alpha_hat` entirely NaN, never a computed 0.0."""
+    df = _panel()
+    df["ndvi_z_peer"] = np.nan
+    a = alpha_hat(df, min_history=1)
+    assert a.isna().all(), f"alpha_hat fabricated a value from an all-NaN reference: {a.unique()}"
+
+
 def test_within_y_removes_the_field_effect():
     df = _panel()
     out, _ = build_target(df, "within_y", features=["ndvi_z_peer"], min_history=3)
@@ -162,9 +174,15 @@ def _panel_two_clusters() -> pd.DataFrame:
 
 
 def test_within_xy_keeps_a_column_that_only_varies_in_train():
-    """BUG-1's fix: degeneracy is decided from `train_mask` alone. A column varying in train (here
-    cluster A) but constant across every held-out test row (cluster B) must still be kept — the
-    demeaning is legitimate there even though this particular test sample happens not to move."""
+    """States the "keep" half of BUG-1's rule for the record, but cannot fail on its own: variance
+    is monotonic under mask-widening, so if the TRAIN-only std is non-degenerate, the union std
+    (train being a subset of it) is necessarily non-degenerate too — this assertion holds whether
+    degeneracy is decided from `train_mask` or from the union, train_mask=None included. The actual
+    guard against BUG-1 (deciding from the union lets test-only variance rescue a column that
+    should have been dropped) is carried entirely by the sibling test directly below,
+    `test_within_xy_drops_a_column_thats_constant_in_train_even_if_test_varies`, whose "drop" outcome
+    a union-based decision gets wrong. Kept as a pair for readability of the rule, not as two
+    independent regression guards."""
     df = _panel_two_clusters()
     train_mask = (df["cluster"] == "A").to_numpy()
     _, feats = build_target(df, "within_xy", features=["ndvi_z_peer", "quirky"],

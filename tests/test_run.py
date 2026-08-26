@@ -163,7 +163,11 @@ def test_leaky_reproduces_the_pre_change_numbers():
         exp_temporal = expected["temporal"][name]
         assert len(got_temporal) == len(exp_temporal)
         drift = max(abs(a - b) for a, b in zip(got_temporal, exp_temporal, strict=True))
-        assert drift < 0.03, (
+        # Measured on this fixture (fixed seed, deterministic): zero 0.0, boosted 0.0046,
+        # persistence 0.0192 — the largest of the three. 0.03 was ~1.9x that and could never
+        # actually fail; 0.025 keeps ~30% headroom above the real purge-gap drift while still
+        # catching a regression that meaningfully changes it.
+        assert drift < 0.025, (
             f"{name}: temporal leaky run diverged by more than the purge gap explains "
             f"(drift={drift:.4f}): {got_temporal} vs {exp_temporal}")
     assert all(f["peer_coverage"] == 1.0 for f in out["folds"]), "leaky must record coverage 1.0"
@@ -220,12 +224,25 @@ def test_the_three_peer_keys_produce_different_summaries():
     (evaluate.precision_at_k) — which is exactly the quantity that moves when `ndvi_z_peer`, and
     therefore `alpha_hat` and the `ztilde <= tau` labels built from it, change with `peer_key`.
     `net_benefit` is not used here: it flags nothing at this threshold for any of the three configs
-    and so is 0.0 across the board regardless of whether the transform is wired in."""
+    and so is 0.0 across the board regardless of whether the transform is wired in.
+
+    `within_y`'s target is defined in terms of `ndvi_z_peer` (via `alpha_hat`), so under
+    `cluster_month` — where a held-out cluster gets zero peer coverage — `alpha_hat` is honestly
+    NaN everywhere (targets.alpha_hat's fix: no fabricated 0.0) and every spatial fold is skipped.
+    That absence of a scored summary is itself evidence the transform is wired in; only leaky and
+    geo_month, which both give this fixture's held-out cluster a real reference, are compared by
+    precision_at_25."""
     df = _geo_panel()
-    p25 = {kind: run_experiment({**GEO_CFG, "peer_key": kind}, df)["summary"]["spatial"]["zero"]
-           ["precision_at_25_mean"]
-           for kind in ("leaky", "cluster_month", "geo_month")}
-    assert len(set(p25.values())) == 3, f"peer_key had no effect on the summary: {p25}"
+    results = {kind: run_experiment({**GEO_CFG, "peer_key": kind}, df)
+               for kind in ("leaky", "cluster_month", "geo_month")}
+
+    assert "zero" not in results["cluster_month"]["summary"]["spatial"], \
+        "cluster_month must skip every fold under within_y, not score one"
+    assert all(f.get("skipped") for f in results["cluster_month"]["folds"])
+
+    p25 = {kind: results[kind]["summary"]["spatial"]["zero"]["precision_at_25_mean"]
+           for kind in ("leaky", "geo_month")}
+    assert p25["leaky"] != p25["geo_month"], f"peer_key had no effect on the summary: {p25}"
 
 
 # ---- Review findings: alpha_hat's cross-boundary history, and within_xy's shared feature list ---
@@ -309,7 +326,10 @@ def test_within_xy_spatial_run_survives_a_column_degenerate_only_in_the_held_out
                              # constant every row in cluster A only; a real, varying signal elsewhere
                              "quirky": 0.0 if cluster == "A" else float(j)})
     df = pd.DataFrame(rows)
-    cfg = {"target": "within_xy", "features": ["ndvi_z_peer", "quirky"], "arms": ["zero"],
+    # "zero" alone made this test vacuous: Zero._predict never touches test[features], so it could
+    # not observe a train/test feature-name mismatch. "linear" runs Sklearn.predict, which indexes
+    # test[features] directly and raises KeyError the moment train and test disagree on columns.
+    cfg = {"target": "within_xy", "features": ["ndvi_z_peer", "quirky"], "arms": ["zero", "linear"],
            "splits": ["spatial"], "min_history": 2, "shrink": 0.0, "seed": 42, "tau": -0.5,
            "peer_key": "leaky", "lat_band": 20.0, "elev_band": 1000.0}
 
@@ -317,6 +337,56 @@ def test_within_xy_spatial_run_survives_a_column_degenerate_only_in_the_held_out
     assert len(out["folds"]) == 3
     for fold in out["folds"]:
         assert fold["arms"], f"fold {fold['fold']} was unexpectedly skipped"
+
+
+def _mixed_geo_panel() -> pd.DataFrame:
+    """Four clusters at lat_band=5.0: C0 (lat 0) and C2 (lat 1) floor into the SAME geo bucket, so
+    each can borrow the other's reference when held out; C1 (lat 100) and C3 (lat 200) each sit
+    alone in their own bucket and get none. Held out one at a time (spatial LOCO), this yields
+    exactly the partial-skip shape Finding 3 measured on real data: 2 of 4 clusters scored, 2
+    skipped — never all-or-nothing the way `_geo_panel` (one shared bucket) or `cluster_month`
+    (every cluster always alone) are."""
+    rng = np.random.default_rng(2)
+    rows = []
+    for cluster, lat in (("C0", 0.0), ("C1", 100.0), ("C2", 1.0), ("C3", 200.0)):
+        for k in range(6):
+            level = (k - 2.5) * 0.5
+            for j in range(12):
+                obs = pd.Timestamp(f"2025-{j + 1:02d}-01")
+                rows.append({"site_id": f"{cluster}-S{k}", "cluster": cluster,
+                             "latitude": lat, "elevation": 0.0,
+                             "obs_date": obs.strftime("%Y-%m-%d"),
+                             "label_date": (obs + pd.Timedelta(days=30)).strftime("%Y-%m-%d"),
+                             "ndvi": 0.5 + level * 0.1 + rng.normal(0, 0.05),
+                             "rvi": 0.4 + level * 0.05 + rng.normal(0, 0.05),
+                             "ndvi_z_peer": level + rng.normal(0, 0.3),
+                             "rain_30": rng.normal(50, 10),
+                             "forward_z": level + rng.normal(0, 0.3)})
+    return pd.DataFrame(rows)
+
+
+def test_a_partially_skipped_split_reports_the_fold_count_not_just_the_average():
+    """Regression for Finding 3: a run that loses SOME folds must not silently average the
+    survivors and report as if nothing were lost. C1 and C3 (isolated geo buckets) must be
+    skipped; C0 and C2 (shared bucket) must be scored — and every arm's summary entry must carry
+    how many of the 4 attempted folds actually scored, plus which ones were dropped and why."""
+    cfg = {"target": "delta_z", "features": ["ndvi_z_peer", "rain_30"], "arms": ["zero", "linear"],
+           "splits": ["spatial"], "min_history": 2, "shrink": 0.0, "seed": 42, "tau": -0.5,
+           "peer_key": "geo_month", "lat_band": 5.0, "elev_band": 500.0}
+    out = run_experiment(cfg, _mixed_geo_panel())
+
+    scored = {f["fold"] for f in out["folds"] if f["arms"]}
+    skipped = {f["fold"] for f in out["folds"] if f.get("skipped")}
+    assert scored == {"C0", "C2"}, scored
+    assert skipped == {"C1", "C3"}, skipped
+
+    for arm in cfg["arms"]:
+        s = out["summary"]["spatial"][arm]
+        assert s["folds_scored"] == 2, s
+        assert s["folds_attempted"] == 4, s
+        assert {f["fold"] for f in s["skipped_folds"]} == {"C1", "C3"}
+        assert all(f["reason"] for f in s["skipped_folds"]), \
+            "each skipped fold must carry why, not just that it was dropped"
 
 
 def test_delta_z_under_cluster_month_skips_rather_than_crashes(capsys):

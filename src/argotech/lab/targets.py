@@ -39,16 +39,23 @@ def alpha_hat(df: pd.DataFrame, column: str = "ndvi_z_peer", unit: str = "site_i
     default of 0.0 would assert "exactly average" about a field nothing is known of. `min_history=0`
     and `min_history=1` behave identically: a row with zero prior observations has weight 0 regardless,
     so without an implicit floor of 1 it would silently compute 0.0 * nan = 0.0 rather than NaN.
+
+    `prior_n` counts only NON-NaN prior observations, not prior rows: `cumcount()` counts rows
+    regardless of whether their `column` value is NaN, so a field whose entire prior history is
+    itself unreferenced (e.g. every peer-cohort lookup missed) would show `prior_n > 0` and compute
+    a weight of 1 against a NaN mean coerced to 0.0 — fabricating "exactly average" from nothing,
+    the same failure `min_history` exists to prevent. `fillna(0.0)` is gone for the same reason: a
+    NaN `prior_mean` must propagate to a NaN `alpha_hat`, never silently become 0.0.
     """
     order = df.sort_values([unit, "obs_date"]).index
     d = df.loc[order]
     grouped = d.groupby(unit, sort=False)[column]
 
     prior_mean = grouped.transform(lambda s: s.expanding().mean().shift(1))
-    prior_n = grouped.cumcount().astype(float)
+    prior_n = grouped.transform(lambda s: s.notna().cumsum().shift(1).fillna(0)).astype(float)
 
     weight = np.where(prior_n > 0, prior_n / (prior_n + shrink), 0.0)
-    out = pd.Series(weight * prior_mean.fillna(0.0).to_numpy(), index=d.index)
+    out = pd.Series(weight * prior_mean.to_numpy(), index=d.index)
     out[prior_n < max(min_history, 1)] = np.nan
 
     return out.reindex(df.index)
