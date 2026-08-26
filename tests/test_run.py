@@ -237,18 +237,19 @@ def test_alpha_hat_sees_a_sites_full_history_across_the_temporal_boundary():
     is information loss, not a leak fix."""
     from argotech.lab.run import _score_fold
 
-    train_raw = pd.DataFrame([
-        {"site_id": "S0", "cluster": "C0", "obs_date": f"2025-01-{i + 1:02d}",
-         "ndvi_z_peer": float(i), "rain_30": 1.0, "forward_z": 0.0}
-        for i in range(6)])
-    test_raw = pd.DataFrame([
-        {"site_id": "S0", "cluster": "C0", "obs_date": f"2025-02-{i + 1:02d}",
-         "ndvi_z_peer": v, "rain_30": 1.0, "forward_z": 0.0}
-        for i, v in enumerate((6.0, 7.0))])
+    panel = pd.DataFrame(
+        [{"site_id": "S0", "cluster": "C0", "obs_date": f"2025-01-{i + 1:02d}",
+          "ndvi_z_peer": float(i), "rain_30": 1.0, "forward_z": 0.0}
+         for i in range(6)]
+        + [{"site_id": "S0", "cluster": "C0", "obs_date": f"2025-02-{i + 1:02d}",
+            "ndvi_z_peer": v, "rain_30": 1.0, "forward_z": 0.0}
+           for i, v in enumerate((6.0, 7.0))])
+    train_raw = panel[panel["obs_date"] < "2025-02-01"]
+    test_raw = panel[panel["obs_date"] >= "2025-02-01"]
 
     cfg = {"target": "within_y", "features": ["ndvi_z_peer", "rain_30"],
            "min_history": 1, "shrink": 0.0, "peer_key": "leaky"}
-    _, test_t, _, _ = _score_fold(cfg, train_raw, test_raw)
+    _, test_t, _, _ = _score_fold(cfg, panel, train_raw, test_raw)
 
     # Row 1's prior history is all 6 train rows (mean 2.5); row 2's is those 6 plus row 1 (mean 3.0).
     # Truncated to test-side-only, row 1 would have NO prior observation (NaN, dropped) and row 2
@@ -256,6 +257,40 @@ def test_alpha_hat_sees_a_sites_full_history_across_the_temporal_boundary():
     assert list(test_t["alpha_hat"]) == [2.5, 3.0], (
         "a test row's alpha_hat must be the expanding mean over ALL strictly-prior observations of "
         f"its own site, train-side included: got {list(test_t['alpha_hat'])}")
+
+
+def test_embargoed_rows_feed_a_later_test_rows_alpha_hat():
+    """forward_chaining (splits.py) rightly excludes an embargoed row -- obs_date < boundary <=
+    label_date -- from both train and test: its LABEL isn't knowable yet. But its FEATURE
+    (`ndvi_z_peer`) is: the row was observed before the boundary. `alpha_hat` is built from that
+    feature, never from the label, so a later test row of the same site must still see it as part
+    of its strictly-prior history. `_score_fold` must therefore build the target over the whole
+    panel (train + test + embargo gap), not just the train/test union."""
+    from argotech.lab.run import _score_fold
+
+    panel = pd.DataFrame([
+        {"site_id": "S0", "cluster": "C0", "obs_date": "2025-01-01", "label_date": "2025-01-05",
+         "ndvi_z_peer": 1.0, "rain_30": 1.0, "forward_z": 0.0},   # train: label_date < boundary
+        {"site_id": "S0", "cluster": "C0", "obs_date": "2025-01-10", "label_date": "2025-02-05",
+         "ndvi_z_peer": 5.0, "rain_30": 1.0, "forward_z": 0.0},   # embargoed: neither cut fires
+        {"site_id": "S0", "cluster": "C0", "obs_date": "2025-02-01", "label_date": "2025-02-10",
+         "ndvi_z_peer": 9.0, "rain_30": 1.0, "forward_z": 0.0},   # test: obs_date >= boundary
+    ])
+    boundary = "2025-01-15"
+    train_raw = panel[panel["label_date"] < boundary]
+    test_raw = panel[panel["obs_date"] >= boundary]
+    assert len(train_raw) == 1 and len(test_raw) == 1 and len(panel) == 3, \
+        "fixture must have exactly one embargoed row, in neither train nor test"
+
+    cfg = {"target": "within_y", "features": ["ndvi_z_peer", "rain_30"],
+           "min_history": 1, "shrink": 0.0, "peer_key": "leaky"}
+    _, test_t, _, _ = _score_fold(cfg, panel, train_raw, test_raw)
+
+    # The test row's only prior observations of S0 are the train row (1.0) and the embargoed row
+    # (5.0) -> expanding mean 3.0. Dropping the embargoed row (the current defect) would give 1.0.
+    assert list(test_t["alpha_hat"]) == [3.0], (
+        "the test row's alpha_hat must include the embargoed row's ndvi_z_peer (a feature, known "
+        f"at prediction time), got {list(test_t['alpha_hat'])}")
 
 
 def test_within_xy_spatial_run_survives_a_column_degenerate_only_in_the_held_out_cluster():

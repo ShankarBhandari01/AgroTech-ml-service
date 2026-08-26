@@ -97,21 +97,26 @@ def _score_arm(arm, train, test, features, tau):
     }
 
 
-def _score_fold(cfg: dict, train_raw: pd.DataFrame, test_raw: pd.DataFrame):
-    """Peer-transform a fold, then build its target on the CONCATENATED train+test frame.
+def _score_fold(cfg: dict, panel: pd.DataFrame, train_raw: pd.DataFrame, test_raw: pd.DataFrame):
+    """Peer-transform a fold, then build its target on the WHOLE PANEL — not just train+test.
 
-    `alpha_hat` is a strictly-prior expanding mean of a site's own history. Called on the test
-    slice alone, a site's pre-boundary rows become invisible to its own post-boundary `alpha_hat`
-    — truncating history that is legitimately available at prediction time, not a leak fix. Fitting
-    once on the concatenation and splitting the result back apart by which side each row came from
-    keeps every row's full prior history without letting a test row's own value influence anything:
-    `alpha_hat` never looks at a row's own `ndvi_z_peer`, only strictly earlier ones, whichever side
-    of the boundary they sit on.
+    `forward_chaining` (splits.py) deliberately embargoes rows with `obs_date < boundary <=
+    label_date`: their label isn't knowable at prediction time, so they belong in neither train nor
+    test. But `alpha_hat` is a strictly-prior expanding mean of `ndvi_z_peer`, a FEATURE — an
+    embargoed row's feature exists at prediction time even though its label doesn't, so it is a
+    legitimate prior observation for a later row of the same site and must still feed `alpha_hat`.
+    Restricting to the train+test union (as opposed to `panel`) would silently drop it again.
 
-    `within_xy`'s degenerate-column decision (`std < 1e-12`) is made from the train rows of that
-    concatenation only (`train_mask`), never the union — deciding it from test data, even test data
-    folded in for `alpha_hat`'s sake, would be the same transduction `fit_peer_stats` refuses by
-    only ever seeing training rows. Train and test therefore always end up sharing one feature list.
+    `panel` is peer-transformed as a whole using stats fit on `train_raw` alone (fitting on rows
+    outside `train_raw`, even embargoed ones, would be the leak this module exists to remove); then
+    `build_target` runs once over all of `panel`, and the fold's train/test rows are picked back out
+    by index. `alpha_hat` never looks at a row's own `ndvi_z_peer`, only strictly earlier ones,
+    whichever side of the boundary — or the embargo gap — they sit on.
+
+    `within_xy`'s degenerate-column decision (`std < 1e-12`) is still made from the train rows only
+    (`train_mask`), never the whole panel — deciding it from non-training data, even embargoed rows
+    folded in for `alpha_hat`'s sake, would be the same transduction `fit_peer_stats` refuses by only
+    ever seeing training rows.
 
     Returns (train_t, test_t, features, peer_coverage).
     """
@@ -121,29 +126,31 @@ def _score_fold(cfg: dict, train_raw: pd.DataFrame, test_raw: pd.DataFrame):
     if peer_key_kind == "leaky":
         # The control arm: today's whole-frame column, untouched. Coverage is trivially 1.0 —
         # every row already carries the (leaky) reference panel.py baked in.
-        train, test, peer_coverage = train_raw, test_raw, 1.0
+        applied, peer_coverage = panel, 1.0
     else:
         bands = {"lat_band": cfg["lat_band"], "elev_band": cfg["elev_band"]}
         stats = fit_peer_stats(train_raw, peer_key_kind, **bands)
-        train, _ = apply_peer_z(train_raw, stats, peer_key_kind, **bands)
-        test, _ = apply_peer_z(test_raw, stats, peer_key_kind, **bands)
+        applied, _ = apply_peer_z(panel, stats, peer_key_kind, **bands)
         # peer_coverage: the share of TEST rows for which `ndvi_z_peer` specifically got a
         # reference. Defined off this column rather than apply_peer_z's own returned fraction,
         # which counts a row covered if EITHER ndvi or rvi found a bucket entry — ndvi_z_peer is
         # the load-bearing feature (+0.0642 permutation importance vs. +0.0051 for the next one)
         # and radar is additive-never-a-gate in this codebase, so a combined figure would
         # misreport the metric that actually matters.
-        peer_coverage = float(test["ndvi_z_peer"].notna().mean()) if len(test) else 0.0
+        test_z = applied.loc[applied.index.isin(test_raw.index), "ndvi_z_peer"]
+        peer_coverage = float(test_z.notna().mean()) if len(test_z) else 0.0
 
-    marker = "_fold_is_train"
-    combined = pd.concat([train.assign(**{marker: True}), test.assign(**{marker: False})],
-                         ignore_index=True)
-    train_mask = combined[marker].to_numpy()
-    combined_t, features = build_target(combined, cfg["target"], features=cfg["features"],
+    is_train, is_test = "_fold_is_train", "_fold_is_test"
+    marked = applied.assign(**{is_train: applied.index.isin(train_raw.index),
+                                is_test: applied.index.isin(test_raw.index)})
+    train_mask = marked[is_train].to_numpy()
+    combined_t, features = build_target(marked, cfg["target"], features=cfg["features"],
                                          min_history=cfg["min_history"], shrink=cfg["shrink"],
                                          train_mask=train_mask)
-    train_t = combined_t[combined_t[marker]].drop(columns=marker).reset_index(drop=True)
-    test_t = combined_t[~combined_t[marker]].drop(columns=marker).reset_index(drop=True)
+    train_t = (combined_t[combined_t[is_train]].drop(columns=[is_train, is_test])
+               .reset_index(drop=True))
+    test_t = (combined_t[combined_t[is_test]].drop(columns=[is_train, is_test])
+              .reset_index(drop=True))
     return train_t, test_t, features, peer_coverage
 
 
@@ -171,11 +178,14 @@ def run_experiment(cfg: dict, df: pd.DataFrame) -> dict:
 
     # `ndvi_z_peer` (and therefore `alpha_hat`, which is derived from it) must be fit on training
     # rows alone, so both the peer transform AND build_target move inside the fold loop: splitting
-    # now happens on the raw panel, before either has been computed.
+    # now happens on the raw panel, before either has been computed. `build_target` runs over the
+    # WHOLE panel `df`, not just this fold's train/test union, so a forward_chaining embargo row
+    # (obs_date < boundary <= label_date: no knowable label, but its feature exists) still feeds a
+    # later row's `alpha_hat` — see `_score_fold`.
     folds = []
     for split_name in cfg["splits"]:
         for fold_name, train_raw, test_raw in SPLITS[split_name](df):
-            train_t, test_t, features, peer_coverage = _score_fold(cfg, train_raw, test_raw)
+            train_t, test_t, features, peer_coverage = _score_fold(cfg, df, train_raw, test_raw)
 
             if train_t.empty or test_t.empty:
                 # A real finding under an honest cluster-keyed reference (delta_z / within_y are
