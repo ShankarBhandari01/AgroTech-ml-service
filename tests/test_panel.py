@@ -24,6 +24,7 @@ def test_manifest_describes_the_panel():
     assert m["rows"] == 3 and m["sites"] == 2 and m["clusters"] == ["C0", "C1"]
     assert m["date_min"] == "2025-01-01" and m["date_max"] == "2025-02-01"
     assert len(m["content_hash"]) == 64
+    assert m["code_version"], "the code version that built the panel must be recorded"
 
 
 def test_the_hash_is_stable_across_identical_frames():

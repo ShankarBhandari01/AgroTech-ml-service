@@ -34,6 +34,7 @@ import argparse
 import hashlib
 import json
 import statistics
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
@@ -327,6 +328,16 @@ def build_dataset(per_cluster: int = 30, years: int = 4, workers: int = 3) -> pd
     return df
 
 
+def _git_sha() -> str:
+    """The code version that built this panel. Same approach as `lab.run._git_sha`, duplicated
+    rather than imported: `run.py` imports `manifest` from here, and importing back would cycle."""
+    try:
+        return subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                               capture_output=True, text=True, check=True).stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):  # pragma: no cover
+        return "unknown"
+
+
 def manifest(df: pd.DataFrame) -> dict:
     """A content fingerprint for a panel, so a metric can name the data it was measured on.
 
@@ -342,6 +353,7 @@ def manifest(df: pd.DataFrame) -> dict:
         "clusters": sorted(df["cluster"].dropna().unique().tolist()),
         "date_min": str(df["obs_date"].min()),
         "date_max": str(df["obs_date"].max()),
+        "code_version": _git_sha(),
     }
 
 
@@ -365,8 +377,7 @@ def main() -> None:
     if df.empty:
         raise SystemExit("no samples built — check Sentinel credentials and network")
 
-    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(args.out, index=False)
+    write_panel(df, args.out)
 
     print(f"\nSaved {args.out}")
     print(f"Features: {len(FEATURE_COLUMNS)}   Samples: {len(df)}   Sites: {df.site_id.nunique()}")

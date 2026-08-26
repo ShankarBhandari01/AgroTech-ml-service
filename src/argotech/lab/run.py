@@ -109,13 +109,19 @@ def run_experiment(cfg: dict, df: pd.DataFrame) -> dict:
                       for name in cfg["arms"]}
             folds.append({"split": split_name, "fold": fold_name, "arms": scored})
 
+    # Keyed by split protocol first: a blocked (spatial) fold and a forward-chaining (temporal)
+    # fold are evidence of different things (splits.py), so pooling their means into one number —
+    # as a flat fold list would — silently averages two validation protocols together.
     summary = {}
-    for name in cfg["arms"]:
-        per_fold = {m: [f["arms"][name][m] for f in folds]
-                    for m in ("net_benefit", "precision_at_25", "spearman")}
-        summary[name] = {f"{m}_mean": float(np.nanmean(v)) for m, v in per_fold.items()}
-        summary[name].update({f"{m}_ci": bootstrap_ci(v, seed=cfg["seed"])
-                               for m, v in per_fold.items()})
+    for split_name in cfg["splits"]:
+        split_folds = [f for f in folds if f["split"] == split_name]
+        summary[split_name] = {}
+        for name in cfg["arms"]:
+            per_fold = {m: [f["arms"][name][m] for f in split_folds]
+                        for m in ("net_benefit", "precision_at_25", "spearman")}
+            s = {f"{m}_mean": float(np.nanmean(v)) for m, v in per_fold.items()}
+            s.update({f"{m}_ci": bootstrap_ci(v, seed=cfg["seed"]) for m, v in per_fold.items()})
+            summary[split_name][name] = s
 
     return {"config": cfg,
             "provenance": {"git_sha": _git_sha(), "dirty": _git_dirty(), "seed": cfg["seed"],
@@ -145,19 +151,23 @@ def main(argv=None) -> int:
         mlflow.set_experiment(cfg.get("name", Path(args.config).stem))
         with mlflow.start_run():
             mlflow.log_params({**{k: str(v) for k, v in cfg.items()}, **result["provenance"]})
-            for arm, s in result["summary"].items():
-                mlflow.log_metrics({f"{arm}.{k}": v for k, v in s.items()
-                                     if not k.endswith("_ci")})
+            for split_name, split_summary in result["summary"].items():
+                for arm, s in split_summary.items():
+                    mlflow.log_metrics({f"{split_name}.{arm}.{k}": v for k, v in s.items()
+                                         if not k.endswith("_ci")})
             mlflow.log_artifact(str(out))
     except ImportError:  # pragma: no cover — mlflow lives in the `train` extra
         print("mlflow not installed; results written to disk only", file=sys.stderr)
 
     print(f"{out}\n")
-    for arm, s in sorted(result["summary"].items(), key=lambda kv: -kv[1]["net_benefit_mean"]):
-        lo, hi = s["net_benefit_ci"]
-        print(f"  {arm:<14} NB {s['net_benefit_mean']:+.4f} [{lo:+.4f}, {hi:+.4f}]"
-              f"   P@25 {s['precision_at_25_mean']:.3f}"
-              f"   rho {s['spearman_mean']:+.3f}")
+    for split_name, split_summary in result["summary"].items():
+        print(f"[{split_name}]")
+        for arm, s in sorted(split_summary.items(), key=lambda kv: -kv[1]["net_benefit_mean"]):
+            lo, hi = s["net_benefit_ci"]
+            print(f"  {arm:<14} NB {s['net_benefit_mean']:+.4f} [{lo:+.4f}, {hi:+.4f}]"
+                  f"   P@25 {s['precision_at_25_mean']:.3f}"
+                  f"   rho {s['spearman_mean']:+.3f}")
+        print()
     return 0
 
 

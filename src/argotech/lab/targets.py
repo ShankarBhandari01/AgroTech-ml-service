@@ -54,11 +54,26 @@ def alpha_hat(df: pd.DataFrame, column: str = "ndvi_z_peer", unit: str = "site_i
     return out.reindex(df.index)
 
 
-def _within(df: pd.DataFrame, columns: list[str], unit: str) -> pd.DataFrame:
-    """Each column minus its own strictly-prior field mean. The Frisch-Waugh-Lovell other half."""
+def _within(df: pd.DataFrame, columns: list[str], unit: str, shrink: float = 0.0) -> pd.DataFrame:
+    """Each column minus its own strictly-prior field mean. The Frisch-Waugh-Lovell other half.
+
+    A time-invariant regressor (e.g. `elevation`) demeans to exactly zero for every row with any
+    history — correct FWL behaviour, since a field's own value has no variation to explain around
+    its own prior mean. Handed to Ridge or the boosted arm as a live feature, an all-zero column is
+    dead weight at best; excluded here rather than passed through, with a one-line note naming what
+    was dropped so the exclusion is visible instead of silently changing the feature count.
+    """
     out = {}
+    dropped = []
     for c in columns:
-        out[c + WITHIN_SUFFIX] = df[c] - alpha_hat(df, column=c, unit=unit, min_history=1)
+        col = df[c] - alpha_hat(df, column=c, unit=unit, min_history=1, shrink=shrink)
+        if col.std(skipna=True) < 1e-12:
+            dropped.append(c)
+            continue
+        out[c + WITHIN_SUFFIX] = col
+    if dropped:
+        print(f"[targets] within_xy: dropped time-invariant column(s) (demean to zero): "
+              f"{', '.join(dropped)}")
     return pd.DataFrame(out, index=df.index)
 
 
@@ -91,10 +106,11 @@ def build_target(df: pd.DataFrame, kind: str, features: list[str], unit: str = "
         out["persistence_pred"] = out["ndvi_z_peer"] - out["alpha_hat"]
         names = list(features)
     elif kind == "within_xy":
-        out = pd.concat([out, _within(out, features, unit)], axis=1)
+        within_df = _within(out, features, unit, shrink=shrink)
+        out = pd.concat([out, within_df], axis=1)
         out["ztilde"] = out["forward_z"] - out["alpha_hat"]
         out["persistence_pred"] = out["ndvi_z_peer"] - out["alpha_hat"]
-        names = [c + WITHIN_SUFFIX for c in features]
+        names = list(within_df.columns)
     else:  # delta_z — the first difference; persistence predicts no change
         out["ztilde"] = out["forward_z"] - out["ndvi_z_peer"]
         out["persistence_pred"] = 0.0

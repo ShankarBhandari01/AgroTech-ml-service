@@ -56,10 +56,12 @@ def test_every_arm_is_scored_in_every_fold():
 
 def test_the_summary_carries_an_interval_per_arm():
     out = run_experiment(CFG, _panel())
-    for name, s in out["summary"].items():
-        assert "net_benefit_mean" in s and "net_benefit_ci" in s, name
-        lo, hi = s["net_benefit_ci"]
-        assert lo <= s["net_benefit_mean"] <= hi
+    assert set(out["summary"]) == set(CFG["splits"])
+    for split_name, split_summary in out["summary"].items():
+        for name, s in split_summary.items():
+            assert "net_benefit_mean" in s and "net_benefit_ci" in s, (split_name, name)
+            lo, hi = s["net_benefit_ci"]
+            assert lo <= s["net_benefit_mean"] <= hi
 
 
 def test_the_same_config_and_data_give_the_same_numbers():
@@ -90,3 +92,26 @@ def test_both_split_protocols_produce_folds():
     assert kinds == {"spatial", "temporal"}, f"missing a split protocol: {kinds}"
     for fold in out["folds"]:
         assert set(fold["arms"]) == set(CFG["arms"])
+
+
+def test_summary_is_grouped_by_protocol_not_pooled_across_them():
+    """4 blocked folds and 3 forward-chaining folds measure different things (splits.py); pooling
+    them into one mean silently reports a number neither protocol produced. `summary` must report
+    each protocol separately, and those separate numbers must not just reproduce a flat pooled
+    average over every fold."""
+    out = run_experiment({**CFG, "splits": ["spatial", "temporal"]}, _panel())
+    assert set(out["summary"]) == {"spatial", "temporal"}
+    for split_summary in out["summary"].values():
+        assert set(split_summary) == set(CFG["arms"])
+
+    # "persistence" and "boosted" vary across folds (unlike "zero", which predicts 0 everywhere and
+    # so trivially agrees with any grouping); on those arms a pooled mean must differ from at least
+    # one protocol's own mean, or the split isn't actually separating anything.
+    for arm in ("persistence", "boosted"):
+        spatial_mean = out["summary"]["spatial"][arm]["net_benefit_mean"]
+        temporal_mean = out["summary"]["temporal"][arm]["net_benefit_mean"]
+        pooled = float(np.mean([f["arms"][arm]["net_benefit"] for f in out["folds"]]))
+        assert spatial_mean != temporal_mean, f"{arm}: the two protocols measured identical folds"
+        assert not np.isclose(pooled, spatial_mean) or not np.isclose(pooled, temporal_mean), (
+            f"{arm}: pooled mean matches both protocol means — the split is not actually separating "
+            "the two validation protocols")

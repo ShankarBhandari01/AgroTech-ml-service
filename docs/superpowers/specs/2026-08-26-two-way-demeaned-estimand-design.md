@@ -132,18 +132,21 @@ unchanged. It requires a minimum history of `m` prior observations; `m` is a swe
 and fields below `m` are excluded from training and flagged at serving (§7).
 
 **Shrinkage.** With few prior observations `alphahat` is noisy, and subtracting a noisy estimate
-injects that noise into the target. `shrink` is an empirical-Bayes estimator pulling the field mean
-toward its cluster mean, with the shrinkage weight fitted on training folds only. `shrink` with
-weight 0 is the raw field mean, so the unshrunk case is a config value rather than a separate code
-path.
+injects that noise into the target. `shrink` pulls the field mean toward **zero**, not toward a
+computed cluster mean: `forward_z` is already standardised within cluster and date, the cluster ICC
+was measured at exactly 0.0000 (§2), and a cluster mean computed over the whole frame would leak
+future observations into a quantity defined as prior-only. The shrinkage weight is a config constant,
+applied identically to every row before any split -- it is swept across experiments (E03), not
+fitted per fold. `shrink` with weight 0 is the raw field mean, so the unshrunk case is a config value
+rather than a separate code path.
 
 **E01 quantifies what shrinkage is worth.** The field effect is 34.5% of variance, but subtracting an
-unshrunk `alphahat` removes only 19.9% of it (Var 1.310 -> 1.050). The missing ~15 points is
-estimation noise injected by a noisy `alphahat`, and it is the upper bound on what a better estimator
-can recover. E03 therefore has a numeric objective rather than a hyperparameter to sweep: drive the
-realised variance reduction from 19.9% toward 34.5%. The transformation itself works as intended --
-field-effect ICC falls 0.345 -> 0.068 and corr(`ztilde`, `alphahat`) is -0.060, so the baseline can
-no longer win by proxy.
+unshrunk `alphahat` removes only 20.3% of it (Var 1.318 -> 1.051, recomputed via
+`targets.build_target(min_history=1)`). The missing ~14 points is estimation noise injected by a
+noisy `alphahat`, and it is the upper bound on what a better estimator can recover. E03 therefore has
+a numeric objective rather than a hyperparameter to sweep: drive the realised variance reduction from
+20.3% toward 34.5%. The transformation itself works as intended -- field-effect ICC falls
+0.345 -> 0.073 and corr(`ztilde`, `alphahat`) is -0.061, so the baseline can no longer win by proxy.
 
 **Frisch–Waugh–Lovell.** Residualising the target alone is not the within estimator; FWL requires
 demeaning both sides. `targets.py` therefore implements both variants and E02 runs them
@@ -157,7 +160,8 @@ apparent explanatory power was also a field effect.
 
 **Baselines under `ztilde`.** The zero predictor is climatology by construction, so the baseline that
 currently wins can no longer win by proxy. Persistence predicts `z_it - alphahat_it`. Majority and
-the seasonal control are retained. All four are recomputed inside every fold, as today.
+the seasonal control are dropped: both were classification-era baselines, and a continuous target
+has no majority class. Zero, persistence and climatology are recomputed inside every fold, as today.
 
 **First deliverable, before any model is fitted — completed 2026-08-26.** E01 reports the variance
 decomposition of `forward_z` on the panel with bootstrap intervals. Its result and the amended
@@ -205,7 +209,7 @@ src/argotech/lab/
   panel.py      build the (field_id, bucket) panel; emit parquet + a manifest sidecar
   targets.py    level_z | within_y | within_xy | delta_z; alphahat with shrinkage; min-history
   splits.py     leave-one-cluster-out, forward chaining, buffered blocking
-  arms.py       zero, majority, persistence, climatology, linear, boosted, +presto, +radar
+  arms.py       zero, persistence, climatology, linear, boosted, +presto, +radar
   evaluate.py   net benefit, ranking with bootstrap CIs, ECE, conformal coverage, AOA
   run.py        entrypoint: python -m argotech.lab.run experiments/E02.yaml
 experiments/

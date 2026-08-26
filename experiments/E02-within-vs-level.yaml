@@ -28,7 +28,7 @@ features:
   - gdd_90
   - stage_kc
   - elevation
-arms: [zero, persistence, linear, boosted]
+arms: [zero, persistence, climatology, linear, boosted]
 splits: [spatial, temporal]
 min_history: 3
 shrink: 0.0

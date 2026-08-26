@@ -105,7 +105,9 @@ def _linear(seed: int) -> Arm:
     stronger rather than weaker.
     """
     return Sklearn(make_pipeline(SimpleImputer(strategy="median"), StandardScaler(),
-                                 Ridge(alpha=1.0, random_state=seed)))
+                                 # Ridge's default (cholesky) solver is a closed-form fit — no
+                                 # randomness to seed. `random_state` is accepted but inert there.
+                                 Ridge(alpha=1.0)))
 
 
 def _boosted(seed: int) -> Arm:

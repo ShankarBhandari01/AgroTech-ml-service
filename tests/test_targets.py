@@ -119,6 +119,32 @@ def test_within_xy_demeans_the_features_too():
     assert "ndvi_z_peer" in out.columns, "the level column stays available for the baselines"
 
 
+def test_within_xy_forwards_shrink_to_the_feature_side():
+    """build_target demeans the target with cfg['shrink'] but must demean the features with the
+    same weight: FWL requires both sides transformed the same way, and a non-zero shrink that only
+    reaches the target would silently stop within_xy being a coherent two-way transform."""
+    df = _panel()
+    unshrunk, _ = build_target(df, "within_xy", features=["ndvi_z_peer"],
+                               min_history=3, shrink=0.0)
+    shrunk, _ = build_target(df, "within_xy", features=["ndvi_z_peer"],
+                             min_history=3, shrink=5.0)
+    assert not np.allclose(unshrunk["ndvi_z_peer_w"], shrunk["ndvi_z_peer_w"]), \
+        "shrink never reached the feature-side demeaning"
+
+
+def test_within_xy_drops_a_time_invariant_column(capsys):
+    """A column that never varies within a field (e.g. elevation) demeans to exactly zero under
+    within_xy — correct FWL behaviour, but dead weight handed to a model as a live feature. It must
+    be excluded from the returned feature names, and the exclusion must be visible, not silent."""
+    df = _panel()
+    df["elevation"] = df["site_id"].map({f"S{k}": float(100 * k) for k in range(4)})
+    out, feats = build_target(df, "within_xy", features=["ndvi_z_peer", "elevation"],
+                              min_history=3)
+    assert feats == ["ndvi_z_peer_w"], f"the degenerate column must be dropped, got {feats}"
+    assert "elevation_w" not in out.columns
+    assert "elevation" in capsys.readouterr().out, "the drop must be named, not silent"
+
+
 def test_delta_z_is_the_first_difference():
     df = _panel()
     out, _ = build_target(df, "delta_z", features=["ndvi_z_peer"], min_history=0)

@@ -32,8 +32,12 @@ def prob_event(pred: np.ndarray, resid_sd: float, tau: float = DEFAULT_TAU) -> n
     Assuming normal residuals is the cheapest defensible bridge; it is an assumption and it is
     stated here rather than buried. Distribution-free coverage is conformal's job, out of scope.
     """
-    sd = resid_sd if resid_sd > 0 else 1.0
-    z = (tau - np.asarray(pred, dtype=float)) / sd
+    if not resid_sd > 0:
+        raise ValueError(
+            f"resid_sd must be positive, got {resid_sd!r}. A placeholder scale of 1.0 would turn a "
+            "degenerate fit into a smooth, plausible, meaningless probability; arms.resid_sd already "
+            "raises on this one call frame away, and this is the same guard applied here.")
+    z = (tau - np.asarray(pred, dtype=float)) / resid_sd
     return np.array([0.5 * (1.0 + math.erf(v / math.sqrt(2.0))) for v in z])
 
 
@@ -66,13 +70,25 @@ def decision_curve(y: np.ndarray, prob: np.ndarray,
 
 
 def precision_at_k(y: np.ndarray, score: np.ndarray, k: int) -> float:
-    """Share of the top-k ranked cases that were events — an agent visits k farms this week."""
+    """Share of the top-k ranked cases that were events — an agent visits k farms this week.
+
+    A constant score, or ties straddling the k-th rank, make "the top k" an artifact of row order
+    rather than of the model: `argsort(kind="stable")` would silently take the first k rows of
+    whatever frame it was handed. In that case the expected precision of an arbitrary same-score
+    selection is exactly the event prevalence, so that is what is returned instead — the same
+    move `spearman` below makes on a degenerate input.
+    """
     y = np.asarray(y, dtype=float)
+    score = np.asarray(score, dtype=float)
     k = min(int(k), len(y))
     if k <= 0:
         return float("nan")
-    top = np.argsort(-np.asarray(score, dtype=float), kind="stable")[:k]
-    return float(np.mean(y[top] == 1))
+    if k == len(y) or np.std(score) == 0:
+        return float(np.mean(y))
+    order = np.argsort(-score, kind="stable")
+    if np.isclose(score[order[k - 1]], score[order[k]]):
+        return float(np.mean(y))
+    return float(np.mean(y[order[:k]] == 1))
 
 
 def spearman(score: np.ndarray, truth: np.ndarray) -> float:
