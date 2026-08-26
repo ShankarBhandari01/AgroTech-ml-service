@@ -32,6 +32,7 @@ from argotech.lab.evaluate import (
     spearman,
 )
 from argotech.lab.panel import manifest
+from argotech.lab.peers import apply_peer_z, fit_peer_stats
 from argotech.lab.splits import forward_chaining, leave_one_cluster_out
 
 SPLITS = {"spatial": leave_one_cluster_out, "temporal": forward_chaining}
@@ -44,6 +45,12 @@ def load_config(path) -> dict:
     cfg.setdefault("shrink", 0.0)
     cfg.setdefault("tau", DEFAULT_TAU)
     cfg.setdefault("splits", ["spatial", "temporal"])
+    # "leaky" reproduces the pre-fix behaviour (panel's whole-frame baked column) as the control
+    # arm; "geo_month" is the default because it is the key that lets a held-out region borrow a
+    # reference at all (lab/peers.py) — cluster_month gives a held-out cluster none.
+    cfg.setdefault("peer_key", "geo_month")
+    cfg.setdefault("lat_band", 20.0)
+    cfg.setdefault("elev_band", 1000.0)
     return cfg
 
 
@@ -98,16 +105,41 @@ def run_experiment(cfg: dict, df: pd.DataFrame) -> dict:
     if unknown:
         raise ValueError(f"unknown arm(s) {unknown}; expected from {sorted(ARMS)}")
 
-    frame, features = build_target(df, cfg["target"], features=cfg["features"],
-                                    min_history=cfg["min_history"], shrink=cfg["shrink"])
+    peer_key_kind = cfg["peer_key"]
+    bands = {"lat_band": cfg["lat_band"], "elev_band": cfg["elev_band"]}
 
+    # `ndvi_z_peer` (and therefore `alpha_hat`, which is derived from it) must be fit on training
+    # rows alone, so both the peer transform AND build_target move inside the fold loop: splitting
+    # now happens on the raw panel, before either has been computed.
     folds = []
     for split_name in cfg["splits"]:
-        for fold_name, train, test in SPLITS[split_name](frame):
-            scored = {name: _score_arm(ARMS[name](cfg["seed"]), train, test,
+        for fold_name, train_raw, test_raw in SPLITS[split_name](df):
+            if peer_key_kind == "leaky":
+                # The control arm: today's whole-frame column, untouched. Coverage is trivially
+                # 1.0 — every row already carries the (leaky) reference panel.py baked in.
+                train, test, peer_coverage = train_raw, test_raw, 1.0
+            else:
+                stats = fit_peer_stats(train_raw, peer_key_kind, **bands)
+                train, _ = apply_peer_z(train_raw, stats, peer_key_kind, **bands)
+                test, _ = apply_peer_z(test_raw, stats, peer_key_kind, **bands)
+                # peer_coverage: the share of TEST rows for which `ndvi_z_peer` specifically got a
+                # reference. Defined off this column rather than apply_peer_z's own returned
+                # fraction, which counts a row covered if EITHER ndvi or rvi found a bucket entry —
+                # ndvi_z_peer is the load-bearing feature (+0.0642 permutation importance vs.
+                # +0.0051 for the next one) and radar is additive-never-a-gate in this codebase, so
+                # a combined figure would misreport the metric that actually matters.
+                peer_coverage = float(test["ndvi_z_peer"].notna().mean()) if len(test) else 0.0
+
+            train_t, features = build_target(train, cfg["target"], features=cfg["features"],
+                                              min_history=cfg["min_history"], shrink=cfg["shrink"])
+            test_t, _ = build_target(test, cfg["target"], features=cfg["features"],
+                                      min_history=cfg["min_history"], shrink=cfg["shrink"])
+
+            scored = {name: _score_arm(ARMS[name](cfg["seed"]), train_t, test_t,
                                         features, cfg["tau"])
                       for name in cfg["arms"]}
-            folds.append({"split": split_name, "fold": fold_name, "arms": scored})
+            folds.append({"split": split_name, "fold": fold_name,
+                          "peer_coverage": peer_coverage, "arms": scored})
 
     # Keyed by split protocol first: a blocked (spatial) fold and a forward-chaining (temporal)
     # fold are evidence of different things (splits.py), so pooling their means into one number —
@@ -121,14 +153,24 @@ def run_experiment(cfg: dict, df: pd.DataFrame) -> dict:
                         for m in ("net_benefit", "precision_at_25", "spearman")}
             s = {f"{m}_mean": float(np.nanmean(v)) for m, v in per_fold.items()}
             s.update({f"{m}_ci": bootstrap_ci(v, seed=cfg["seed"]) for m, v in per_fold.items()})
+            # Same value for every arm in a split — coverage is a property of the fold's peer
+            # transform, not of the arm — but recorded per-arm so `summary`'s {split: {arm: {...}}}
+            # shape (and every consumer of it) stays exactly as it was.
+            s["peer_coverage_mean"] = float(np.nanmean([f["peer_coverage"] for f in split_folds]))
             summary[split_name][name] = s
+
+    # Descriptive only, not used for scoring: how many rows in the raw panel have enough field
+    # history to ever carry a target at all. The fold loop above builds its own train/test target
+    # per split (ndvi_z_peer, and therefore alpha_hat, must be fold-fit), so there is no longer one
+    # whole-panel `frame` to report a single N from; this reproduces that count for provenance,
+    # the way `manifest` describes the panel rather than what any one fold scored.
+    scored_rows = len(build_target(df, cfg["target"], features=cfg["features"],
+                                    min_history=cfg["min_history"], shrink=cfg["shrink"])[0])
 
     return {"config": cfg,
             "provenance": {"git_sha": _git_sha(), "dirty": _git_dirty(), "seed": cfg["seed"],
-                            # `manifest` describes the INPUT panel — the lineage anchor. `scored_rows`
-                            # is what `build_target` actually kept after dropping rows with no field
-                            # reference, and is the N that underlies every metric below.
-                            "scored_rows": len(frame),
+                            # `manifest` describes the INPUT panel — the lineage anchor.
+                            "scored_rows": scored_rows,
                             **manifest(df)},
             "folds": folds, "summary": summary}
 
@@ -166,7 +208,8 @@ def main(argv=None) -> int:
             lo, hi = s["net_benefit_ci"]
             print(f"  {arm:<14} NB {s['net_benefit_mean']:+.4f} [{lo:+.4f}, {hi:+.4f}]"
                   f"   P@25 {s['precision_at_25_mean']:.3f}"
-                  f"   rho {s['spearman_mean']:+.3f}")
+                  f"   rho {s['spearman_mean']:+.3f}"
+                  f"   peer_coverage {s['peer_coverage_mean']:.3f}")
         print()
     return 0
 

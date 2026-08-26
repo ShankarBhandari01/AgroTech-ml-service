@@ -34,3 +34,6 @@ min_history: 3
 shrink: 0.0
 tau: -1.0                   # the incumbent's severe cut, so an "event" means the same thing
 seed: 42
+peer_key: geo_month         # leaky | cluster_month | geo_month — leaky is the pre-fix control arm
+lat_band: 20.0
+elev_band: 1000.0
