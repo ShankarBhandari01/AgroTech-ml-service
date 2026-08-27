@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.impute import SimpleImputer
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import HuberRegressor, Ridge
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -130,12 +130,43 @@ def _boosted(seed: int) -> Arm:
         random_state=seed))
 
 
+def _linear_huber(seed: int) -> Arm:
+    """Huber loss over the same imputer+scaler pipeline as `_linear`.
+
+    Squared error weights an outlier by its squared distance, so a field genuinely at z=+5.6 in a
+    tight cohort dominates the fit even though it is real signal, not noise (see the panel-fix
+    writeup this arm accompanies). Huber's loss is quadratic near zero and linear past `epsilon`,
+    so it still fits such a point but stops letting it dictate the coefficients. `epsilon=1.35` is
+    sklearn's own default (95% efficiency under a Gaussian) — left alone rather than tuned to this
+    panel's tails, so the arm answers "does a standard robust loss help" rather than "did we search
+    until one did".
+    """
+    return Sklearn(make_pipeline(SimpleImputer(strategy="median"), StandardScaler(),
+                                 HuberRegressor(epsilon=1.35)))
+
+
+def _boosted_abs(seed: int) -> Arm:
+    """`_boosted`, with absolute-error loss instead of squared error — otherwise identical
+    hyperparameters, including the same refusal of internal early stopping and for the same reason
+    (see `_boosted`): sklearn's IID internal validation split would leak across the spatial blocking
+    the outer protocol relies on.
+    """
+    return Sklearn(HistGradientBoostingRegressor(
+        loss="absolute_error",
+        max_iter=300, learning_rate=0.06, max_depth=None, min_samples_leaf=25,
+        l2_regularization=1.0,
+        early_stopping=False,
+        random_state=seed))
+
+
 ARMS = {
     "zero": lambda seed: Zero(),
     "persistence": lambda seed: Persistence(),
     "climatology": lambda seed: Climatology(),
     "linear": _linear,
     "boosted": _boosted,
+    "linear_huber": _linear_huber,
+    "boosted_abs": _boosted_abs,
 }
 
 

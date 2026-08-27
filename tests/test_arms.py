@@ -80,7 +80,7 @@ def test_persistence_carries_the_current_within_deviation_forward():
 
 def test_the_fitted_arms_are_deterministic_given_a_seed():
     train, test, feats = _split()
-    for name in ("linear", "boosted"):
+    for name in ("linear", "boosted", "linear_huber", "boosted_abs"):
         a = ARMS[name](42).fit(train, feats).predict(test, feats)
         b = ARMS[name](42).fit(train, feats).predict(test, feats)
         assert np.allclose(a, b), f"{name} is not reproducible at a fixed seed"
@@ -90,9 +90,57 @@ def test_the_fitted_arms_tolerate_a_missing_feature_value():
     train, test, feats = _split()
     holed = test.copy()
     holed.loc[holed.index[0], feats[0]] = np.nan
-    for name in ("linear", "boosted"):
+    for name in ("linear", "boosted", "linear_huber", "boosted_abs"):
         pred = ARMS[name](42).fit(train, feats).predict(holed, feats)
         assert np.isfinite(pred).all(), f"{name} propagated a NaN into its prediction"
+
+
+# ---------------------------------------------------------------------------------------------
+# Robustness arms (phase E — linear_huber, boosted_abs)
+# ---------------------------------------------------------------------------------------------
+
+def _split_with_planted_outlier(outlier_z: float = 40.0):
+    """The `_split` panel, with one training row's target blown out to an extreme value.
+
+    A squared-error fit is dragged toward an outlier proportional to its squared distance; a
+    robust loss (Huber / absolute-error) should barely move. That difference — not just "both
+    arms fit and predict" — is the entire justification for these two arms existing.
+    """
+    train, test, feats = _split()
+    clean = train.copy()
+    outlier = train.copy()
+    outlier.loc[outlier.index[0], "ztilde"] = outlier_z
+    return clean, outlier, test, feats
+
+
+def test_linear_huber_is_less_moved_by_a_planted_outlier_than_ridge():
+    clean, outlier, test, feats = _split_with_planted_outlier()
+
+    ridge_clean = ARMS["linear"](42).fit(clean, feats).predict(test, feats)
+    ridge_outlier = ARMS["linear"](42).fit(outlier, feats).predict(test, feats)
+    huber_clean = ARMS["linear_huber"](42).fit(clean, feats).predict(test, feats)
+    huber_outlier = ARMS["linear_huber"](42).fit(outlier, feats).predict(test, feats)
+
+    ridge_shift = np.abs(ridge_outlier - ridge_clean).mean()
+    huber_shift = np.abs(huber_outlier - huber_clean).mean()
+    assert huber_shift < ridge_shift, (
+        f"Huber moved as much as or more than Ridge under a planted outlier "
+        f"(huber={huber_shift:.4f}, ridge={ridge_shift:.4f})")
+
+
+def test_boosted_abs_is_less_moved_by_a_planted_outlier_than_squared_error_boosting():
+    clean, outlier, test, feats = _split_with_planted_outlier()
+
+    sq_clean = ARMS["boosted"](42).fit(clean, feats).predict(test, feats)
+    sq_outlier = ARMS["boosted"](42).fit(outlier, feats).predict(test, feats)
+    abs_clean = ARMS["boosted_abs"](42).fit(clean, feats).predict(test, feats)
+    abs_outlier = ARMS["boosted_abs"](42).fit(outlier, feats).predict(test, feats)
+
+    sq_shift = np.abs(sq_outlier - sq_clean).mean()
+    abs_shift = np.abs(abs_outlier - abs_clean).mean()
+    assert abs_shift < sq_shift, (
+        f"absolute-error boosting moved as much as or more than squared-error under a planted "
+        f"outlier (abs_error={abs_shift:.4f}, squared_error={sq_shift:.4f})")
 
 
 def test_resid_sd_is_positive_and_finite():

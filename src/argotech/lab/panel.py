@@ -80,6 +80,21 @@ CLUSTERS = [
 LABEL_HORIZON_INTERVALS = 1     # one P30D bucket ahead
 SEVERE_Z, ELEVATED_Z = -1.0, -0.35
 
+# NDVI = (NIR - Red) / (NIR + Red). NDVI <= 0 means NIR <= Red — that is water, cloud, shadow or
+# snow, never a vegetation canopy. A negative-NDVI observation is a non-canopy pixel, not a
+# low-vigour crop; letting it into a cohort (or accepting it as a label) both misdescribes that
+# site's state and drags the peer mean/sd toward a population this dataset was never meant to
+# describe. Applied to both the cohort and the label observation below.
+MIN_VALID_NDVI = 0.0
+
+# Below this, a cohort's spread is not "peers happen to agree", it is a construction artefact
+# (duplicate scenes, a re-ingested cache entry) that would blow up the z-score's denominator.
+# Measured cohort sds in this panel run 0.07-0.33 (see the peer-standardisation-leak writeup), so
+# 0.005 sits well over an order of magnitude below anything a real cohort has produced — it refuses
+# only the degenerate case, never a genuine low-variance cohort — while still being ~5000x looser
+# than the previous 1e-6, which guarded against equal floats rather than degenerate spread.
+MIN_COHORT_SD = 0.005
+
 # `SentinelClient._stats` omits an interval with no valid statistics, so "the next bucket" is the
 # next *cloud-free* one, not the next 30 days. Measured over the cached histories, 7% of samples
 # were 60-240 days ahead and pooled into a target everything downstream calls a 30-day forecast.
@@ -173,11 +188,30 @@ def bands_history(site: dict, days: int) -> list[dict]:
     )
 
 
-def collect_site(site: dict, years: int) -> dict | None:
-    """Fetch both upstreams for one site. Returns None when either is unusable."""
+# A deterministic rebuild of data/training_set.parquet is NOT currently possible, and that is why
+# this change does not attempt one. The Sentinel/SAR caches are keyed `{site_id}-{days}` — date
+# independent, reusable across runs — but the meteo cache in `data.meteo.fetch_archive` is keyed
+# `{lat},{lon},{start},{end}`, and both dates are derived from `date.today()` at collection time.
+# The committed cache holds at least five distinct windows (2022-05-03/04/08/14 through
+# 2026-08-04/05/09/15): the panel was assembled across several days, and sites do not all share one
+# weather window. That matters because `_climatological_rain_30` uses each site's *full* range —
+# a different window changes the climatology, not just the cache key.
+#
+# A rebuild run today would request 2022-05-20..2026-08-21, matching none of the cached windows:
+# 100% meteo cache miss, ~122 fresh network calls (a prior backfill on this scale exhausted
+# Open-Meteo's daily quota), and a new weather window that would confound this NDVI-validity change
+# with an unrelated data-window change. So: no rebuild here. `end_date` below exists so a *future*
+# rebuild can be pinned and repeated deterministically once one is actually undertaken.
+def collect_site(site: dict, years: int, end_date: date | None = None) -> dict | None:
+    """Fetch both upstreams for one site. Returns None when either is unusable.
+
+    `end_date` pins what would otherwise be `date.today()`, so two calls made on different days
+    request the identical archive window and are reproducible. Omitted, behaviour is unchanged.
+    """
+    today = end_date or date.today()
     days = years * 365
-    start = (date.today() - timedelta(days=days + WINDOW_DAYS + 10)).isoformat()
-    end = (date.today() - timedelta(days=6)).isoformat()   # ERA5 lags ~5 days
+    start = (today - timedelta(days=days + WINDOW_DAYS + 10)).isoformat()
+    end = (today - timedelta(days=6)).isoformat()   # ERA5 lags ~5 days
 
     payload = meteo.fetch_archive(site["latitude"], site["longitude"], start, end)
     history = _sentinel_history(site, days)
@@ -221,11 +255,14 @@ def build_samples(sites: list[dict]) -> pd.DataFrame:
     # *label* only. `forward_z` is never computed at serving, so it carries no train/serve skew and
     # its concurrent construction is what makes it a peer-relative target worth predicting. The
     # feature-side peer anomaly is standardised in the second pass instead; see `peer_stats`.
-    cohort: dict[tuple[str, str], list[float]] = {}
+    # Each entry carries the contributing site_id alongside its ndvi so a field can be excluded from
+    # its own cohort by *identity* below, not by value — see the peer-exclusion comment.
+    cohort: dict[tuple[str, str], list[tuple[str, float]]] = {}
     for s in sites:
         for obs in s["history"]:
-            if finite(obs.get("ndvi")):
-                cohort.setdefault((s["cluster"], obs["sensing_date"]), []).append(obs["ndvi"])
+            ndvi = obs.get("ndvi")
+            if finite(ndvi) and ndvi >= MIN_VALID_NDVI:
+                cohort.setdefault((s["cluster"], obs["sensing_date"]), []).append((s["site_id"], ndvi))
 
     rows = []
     for s in sites:
@@ -245,6 +282,13 @@ def build_samples(sites: list[dict]) -> pd.DataFrame:
             gap = (date.fromisoformat(label_obs["sensing_date"])
                    - date.fromisoformat(obs["sensing_date"])).days
             if gap > MAX_LABEL_GAP_DAYS:
+                continue
+
+            # The label observation must itself be a valid canopy measurement — see MIN_VALID_NDVI.
+            # Accepting an invalid label while excluding the same value from peers' cohorts would be
+            # inconsistent: a water/cloud/shadow pixel is not a low-vigour outcome to standardise.
+            label_ndvi = label_obs.get("ndvi")
+            if not finite(label_ndvi) or label_ndvi < MIN_VALID_NDVI:
                 continue
 
             # `satellite_block` does no filtering of its own, so a NaN observation reaches the row
@@ -276,15 +320,18 @@ def build_samples(sites: list[dict]) -> pd.DataFrame:
             row = build(window, sat, site_ctx)
 
             # --- label: peer-standardised NDVI one interval ahead ---
-            peers_future = [v for v in cohort.get((s["cluster"], label_obs["sensing_date"]), [])
-                            if v != label_obs["ndvi"]]
+            # Exclude the field itself by *site identity*, not by value: excluding by value (the
+            # previous form of this line) also drops any peer that happens to share this field's
+            # exact NDVI reading, silently shrinking and biasing the cohort.
+            peers_future = [v for site_id, v in cohort.get((s["cluster"], label_obs["sensing_date"]), [])
+                            if site_id != s["site_id"]]
             if len(peers_future) < 5:
                 continue
             mean = statistics.fmean(peers_future)
             sd = statistics.pstdev(peers_future)
-            if sd < 1e-6:
+            if sd < MIN_COHORT_SD:
                 continue
-            z = (label_obs["ndvi"] - mean) / sd
+            z = (label_ndvi - mean) / sd
             # `NaN <= SEVERE_Z` is False and so is `NaN <= ELEVATED_Z`, which would label an
             # *unobserved* outcome "healthy". An absent label is not a class.
             if not finite(z):
@@ -316,11 +363,14 @@ def build_samples(sites: list[dict]) -> pd.DataFrame:
     return df
 
 
-def build_dataset(per_cluster: int = 30, years: int = 4, workers: int = 3) -> pd.DataFrame:
+def build_dataset(per_cluster: int = 30, years: int = 4, workers: int = 3,
+                   end_date: date | None = None) -> pd.DataFrame:
+    """`end_date` pins the collection window (see `collect_site`) so a rebuild can be repeated
+    deterministically. Omitted, behaviour is unchanged: every site is collected against today."""
     sites = sample_sites(per_cluster)
     print(f"Collecting {len(sites)} sites x {years}y from Open-Meteo ERA5 + Sentinel-2 ...")
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        collected = [s for s in pool.map(lambda s: collect_site(s, years), sites) if s]
+        collected = [s for s in pool.map(lambda s: collect_site(s, years, end_date), sites) if s]
     print(f"  {len(collected)}/{len(sites)} sites usable")
 
     df = build_samples(collected)
