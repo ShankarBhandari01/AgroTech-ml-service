@@ -121,6 +121,29 @@ fold with the most room to score. No seed sweep could sharpen this further: pred
 bit-identical across five seeds for both arms (`linear` is a closed-form ridge solve; `boosted` runs
 with `early_stopping=False`), so a sweep would report five copies of one number, not five draws.
 
+**The mechanism behind that split, which matters more than any single number above.** Comparing the
+temporal column across two targets isolates it: `level_z`, which *retains* the field effect, clears
+zero for a learned arm and for the field-mean baseline alike — `boosted` +0.0194 [+0.0182, +0.0216],
+`climatology` +0.0086 [+0.0044, +0.0116]. `within_xy`, which *removes* it by demeaning the target and
+the features per Frisch–Waugh–Lovell, does not — `boosted` -0.0011 [-0.0051, +0.0031], `linear`
+-0.0145 [-0.0173, -0.0129], `persistence` -0.0468 [-0.0693, -0.0234]: every learned arm at or below
+zero, several significantly so. Remove the field effect and the temporal skill goes with it. A
+separate field-effect decomposition put that effect at 34.5% of `forward_z`'s variance directly
+(95% CI [0.2357, 0.4353], 1,000 site bootstraps); this reaches the same place from the opposite
+direction and licenses a stronger claim — at this resolution the field effect is essentially all of
+the predictable signal. That single mechanism accounts for three things otherwise reported as
+separate observations: why climatology was so hard to beat, why the model behaved like a smoothed
+persistence model, and why the reformulated target has nothing left to predict. Read this way, the
+negative result is not "the model does not work." It is that the reformulation did exactly what it
+was designed to do, and what remains after removing the field effect is not predictable from these
+features, on this data, at four independent spatial units.
+
+Robust losses were tested against the heavy tails described in §4 (`linear_huber`, `boosted_abs`, run
+alongside the existing arms, not replacing them) and do not help: equal or worse everywhere, clearly
+worse where signal exists — `level_z` temporal `boosted` +0.0194 against `boosted_abs` +0.0126. The
+tails are real but were not hurting the fit; down-weighting them costs signal rather than recovering
+any.
+
 Every number above was computed on the panel exactly as committed, and that panel is known to contain
 233 rows (5.07%) with physically invalid NDVI (NDVI < 0, i.e. NIR ≤ Red — water, cloud, shadow or
 snow, never vegetation), which drives `forward_z`'s tail: rows with |z| > 3 are 8× enriched for a
