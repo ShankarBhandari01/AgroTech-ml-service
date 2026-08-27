@@ -460,6 +460,14 @@ boundaries so peer cohorts become spatial rather than temporal. Drift monitoring
 
 ## 9. Retraining results
 
+> **Superseded in part.** This section and §9.1 evaluate the `forward_z`/`ndvi_z_peer` pipeline under
+> `argotech.training`, which no longer exists — it was retired in favour of `argotech.lab` (§11).
+> That retirement also fixed a peer-reference leak these sections' numbers do not reflect: the
+> constants behind `ndvi_z_peer` here were fitted over the whole frame, held-out clusters included.
+> §9.2 reports the corrected, fold-fitted results and the multiple-comparisons finding that governs
+> how to read every spatial number in this document, including the ones below. Read this section as
+> the historical record of what was believed at the time, not as the current evidence.
+
 The model was rebuilt on real data (`argotech.training.dataset` → `argotech.training.train`) and
 evaluated under the protocol in §6.
 
@@ -540,6 +548,13 @@ persistence on temporal generalisation, which it does not yet do.
 
 ## 9.1 Cross-region robustness experiments
 
+> **Superseded in part.** Like §9, these experiments ran on `argotech.training`'s whole-frame-fitted
+> peer reference, since retired. §9.2 supersedes the spatial-skill picture below with a fold-fitted
+> comparison and the multiple-comparisons argument the field-relative results here did not have
+> available. **C**'s linear-vs-boosted finding also does not survive the reformulated target — see
+> the superseding note at the head of **C** itself and §9.2. The Presto results (**F**, **G**) are a
+> separate architecture comparison, not leak-dependent, and are not contradicted by §9.2.
+
 Three changes, run against the same 7,527-sample dataset with no rebuild, prompted by a review of
 recent cross-region agricultural ML. Full output: `artifacts/experimental/`.
 
@@ -582,6 +597,19 @@ these are the two metrics worth having. Six cluster-relative twins now appear in
 permutation importances, so the transform is carrying signal rather than adding noise.
 
 ### C. The linear arm wins out-of-cluster
+
+> **Superseded in part.** The comparison below was measured on the `level` target under the
+> whole-frame-fitted (leaky) peer reference, both since corrected — see §9.2 and
+> `experiments/E05-robust-loss/` (commit `7ec0ed7`). Under the reformulated target the reversal does
+> not hold: `linear`'s temporal net benefit is significantly *harmful* — `level_z`/`geo_month`
+> **-0.0197 [-0.0264, -0.0066]**, `within_xy`/`geo_month` **-0.0145 [-0.0173, -0.0129]**,
+> `within_xy`/`leaky` **-0.0189 [-0.0202, -0.0181]** — every interval entirely below zero, i.e.
+> reliably worse than predicting nothing. The inference drawn below, "the constraint is distribution
+> shift, not model capacity," was drawn from a comparison that no longer holds and should not be
+> carried into a write-up unexamined. Note what this does **not** establish: the reversal shows the
+> earlier inference was not robust to the target and reference used, not that the constraint *is*
+> capacity — nothing in E05 tested that question. The text below is retained as the record of what
+> was believed at the time.
 
 A multinomial logistic head over identical features, added as a ceiling check on the strength of
 arXiv 2605.08113's finding that simpler models transfer better under shift. It does not merely match
@@ -790,6 +818,102 @@ That choice belongs to whoever owns the latency budget.
 
 ---
 
+## 9.2 The lab redesign: a fold-fitted peer reference, and what survives multiple comparisons
+
+`argotech.training` is retired (§11); `argotech.lab` replaces it and fixed three leaks the results in
+§9 and §9.1 do not reflect. Full citation trail: `docs/FACTS.md` §7. Concepts and formulas, with
+their warrants: `docs/CONCEPTS.md` Part 4. In order: `alpha_hat`'s own guard test was blind to a
+same-row leak; the temporal split cut training on the prediction date instead of the label date
+(§9/§9.1's forward-chaining folds inherited this, and a later commit re-shipped the same defect under
+a message claiming to fix it — it is corrected now, in `argotech.lab.splits.forward_chaining`); and
+the peer reference behind `ndvi_z_peer`, which both the label variants and the persistence baseline
+depend on, was fitted over the whole frame — 42 of 45 `cluster|MM` buckets span multiple years, and
+under leave-one-cluster-out a held-out cluster's own bucket was fit from itself.
+
+`argotech.lab.peers` now fits three keys per fold: `leaky` (the old whole-frame column, kept as a
+control), `cluster_month`, and `geo_month` (fixed latitude/elevation bands, never quantiles fit over
+the frame). The consequence is itself a finding: an honest `cluster_month` fit gives a held-out
+cluster **no reference at all** — coverage `[0.0, 0.0, 0.0, 0.0]`. `geo_month` restores coverage to
+`[1.0, 1.0, 1.0, 0.472]`, the shortfall being Kenya, the panel's one highland cluster, which borrows a
+reference only below the 1000 m elevation band.
+
+### The negative result
+
+Under the corrected, fold-fitted protocol, `level_z` — the only target that supports comparing across
+peer keys, since `within_y`/`within_xy`/`delta_z` are defined *through* `ndvi_z_peer` — clears a 95%
+interval excluding zero at **every temporal key** (`leaky` +0.0194, `cluster_month` +0.0179,
+`geo_month` +0.0172) and at **no spatial key that could be evaluated** (`leaky` +0.0064
+[-0.0014, +0.0142]; `geo_month` +0.0066 [-0.0020, +0.0157]; `cluster_month` could not be evaluated —
+every fold skipped, no reference exists). The single largest cell anywhere in the 12-cell matrix,
+spatial / `geo_month` / `within_xy` / `linear` at +0.0404, has a 95% CI of [-0.0072, +0.0940] on the
+fold-level bootstrap and [-0.0026, +0.0781] on a 200-replicate site-level bootstrap — **both cross
+zero** — and its per-fold decomposition is two of four folds negative (Benue +0.1268, Kaduna -0.0103,
+Kano -0.0042, Kenya +0.0491), with the mean carried by Benue at roughly 3× the reported effect. A
+24-cell sweep over `geo_month` band widths found no band at which spatial net benefit separates from
+zero.
+
+**Read plainly: the strongest spatial result this repository has produced does not survive its own
+confidence interval, and neither does any configuration measured near it.** Temporal skill, by
+contrast, is established — every temporal cell tested clears zero.
+
+### The mechanism: temporal skill is the field effect, and removing it removes the skill
+
+`experiments/E05-robust-loss/` (commit `7ec0ed7`) isolates why. Compare the temporal column across
+the two targets, `leaky`/`geo_month` as available: `level_z`, which **retains** the field effect,
+clears zero for both a learned arm and the field-mean baseline — `boosted` **+0.0194
+[+0.0182, +0.0216]**, `climatology` **+0.0086 [+0.0044, +0.0116]**. `within_xy`, which **removes** it
+by demeaning both target and features per FWL (`docs/CONCEPTS.md` Part 4), does not: `boosted`
+**-0.0011 [-0.0051, +0.0031]**, `linear` **-0.0145 [-0.0173, -0.0129]**, `persistence` **-0.0468
+[-0.0693, -0.0234]** — every learned arm at or below zero, several significantly below.
+
+Remove the field effect and the temporal skill goes with it. §7.1's decomposition
+(`experiments/E01_variance_decomposition.out`) measured that effect at 34.5% of variance directly;
+this reaches the same conclusion from the opposite direction, and licenses a stronger statement:
+**at this resolution the field effect is essentially all of the predictable signal.** That is why
+climatology was hard to beat in §9, why the incumbent behaved like a smoothed persistence model, and
+why the reformulated target has nothing left to predict.
+
+The same experiment tested whether robust losses recover anything from the heavy tails documented in
+`docs/CONCEPTS.md` Part 4 (`linear_huber`, `boosted_abs`, run alongside the existing arms rather than
+replacing them). They do not: equal or worse everywhere, clearly worse where signal exists —
+`level_z`/`leaky` temporal `boosted` +0.0194 against `boosted_abs` +0.0126 [+0.0101, +0.0144].
+`linear_huber` reaches **+0.0451 [-0.0011, +0.0964]** on `within_xy`/`geo_month` spatial — the
+closest anything in this repository has come to clearing zero there — and it still crosses. The tails
+are real but were not hurting the fit; down-weighting them costs signal rather than recovering any.
+Not adopted.
+
+### The multiple-comparisons argument
+
+165 spatial cells were tested across the leave-one-cluster-out grid and the band sweep; 8 cleared a
+95% interval excluding zero, against ~4.1 expected by chance with no correction — a ratio of **1.9×**.
+65 temporal cells were tested; 13 cleared zero against ~1.6 expected — **8.0×**. No formal correction
+(Bonferroni, Benjamini–Hochberg) has been applied to either figure; the raw ratio is reported instead
+of one, and a pre-registered comparison would be the proper fix. This is the argument that governs how
+to read every spatial number in §9, §9.1 and this section: temporal skill clears its bar by a wide
+margin; spatial skill does not clear its bar by more than chance would predict at four independent
+spatial units.
+
+This is **not** an argument that the 8 significant spatial cells are fictitious — they exist, and an
+earlier internal claim that "no configuration shows out-of-region skill" was wrong and is corrected
+here. It is an argument that 8 of 165, at this ratio, is not distinguishable from noise — reinforced
+by the hits being internally incoherent: `level_z` / `geo_month` / `boosted` clears zero at a 500 m
+elevation band and at 2000 m but not at the 1000 m band between them, which is not the shape a real
+effect produces.
+
+### One further caveat that applies to every number above
+
+The panel these results were computed on (`content_hash 6c832dc2…`) contains 233 rows (5.07%) with
+physically invalid NDVI (NDVI < 0 — water, cloud, shadow or snow, never vegetation), which drives
+`forward_z`'s extreme tail: rows with `|z| > 3` are 8× enriched for a negative label-date NDVI. The
+fix (`MIN_VALID_NDVI = 0.0`, `MIN_COHORT_SD = 0.005`) landed in `argotech.lab.panel`, but the panel
+was **deliberately not rebuilt**: the meteo cache is keyed on `date.today()` and the committed panel
+spans at least five distinct fetch windows, so a rebuild today would both invalidate 38 committed
+result files pinned to the current `content_hash` and confound the NDVI fix with a change in weather
+data. Every number in this section, without exception, was computed on the panel as committed,
+invalid observations included.
+
+---
+
 ## 10. Serving architecture: batch features + audit trail
 
 Two changes that make the rest of the roadmap possible.
@@ -838,10 +962,33 @@ exist, predictions still serve and the write is logged and skipped.
 
 ## 11. Implemented in this branch
 
-- **Retrained model** — `argotech/training/dataset.py` rebuilt from scratch: real ERA5 + Sentinel-2,
-  90-day feature window, 30-day-ahead peer-standardised label, documented leakage controls.
-  `argotech/training/train.py` implements the §6 protocol (spatially blocked, forward-chaining,
-  baselines, permutation importance on held-out ground, ECE, precision@k). Results in §9.
+- **Retrained model** — `argotech/training/dataset.py` (as it was) rebuilt from scratch: real ERA5 +
+  Sentinel-2, 90-day feature window, 30-day-ahead peer-standardised label, documented leakage
+  controls, evaluated under the §6 protocol (spatially blocked, forward-chaining, baselines,
+  permutation importance on held-out ground, ECE, precision@k). Results in §9. `argotech.training` is
+  now retired — see below.
+- **`argotech.lab` replaces `argotech.training`.** `training/train.py` (684 lines) and its
+  `__init__.py` are deleted; `dataset.py` moved to `argotech/lab/panel.py` and `embed.py` to
+  `argotech/lab/embed.py`, both by `git mv` (history preserved across the pre-move commits).
+  `argotech/lab/export.py` is now the sole producer of `artifacts/agronomic_risk.joblib`, proven
+  end-to-end before `train.py` was deleted: exported to a scratch path, loaded through
+  `argotech/models/registry.py`'s `ModelManager`, passed the contract check, and `model.predict`
+  succeeded on the exact DataFrame shape `serving/pipeline.py` builds. The production artifact itself
+  is unchanged by any of this — an empty diff across the session.
+- **`argotech/lab/peers.py`** fits the peer reference behind `ndvi_z_peer`/`rvi_z_peer` on training
+  rows only, per fold, under three keys — `leaky` (whole-frame control), `cluster_month`, and
+  `geo_month` (latitude/elevation bands) — closing the leak where the old whole-frame fit let a
+  held-out cluster's bucket draw from itself. `argotech/lab/export.py` remains the one place that
+  fits on the whole panel, deliberately: a shipped artifact runs at inference time, where there is no
+  future to leak from. Results and the multiple-comparisons argument governing them: §9.2.
+- **`argotech/lab/splits.py`** corrects the temporal split to purged/embargoed forward chaining —
+  training takes `label_date < boundary`, test takes `obs_date >= boundary`, rows satisfying neither
+  are embargoed — replacing a cut on the prediction date that left the last month of training
+  outcomes known after the first test predictions were made. See §9.2.
+- **`argotech/lab/panel.py`** enforces NDVI validity (`MIN_VALID_NDVI = 0.0`, `MIN_COHORT_SD =
+  0.005`) and fixes a peer-exclusion bug — peers were excluded by NDVI value rather than site
+  identity, silently dropping and biasing cohorts. The fix applies to future rebuilds only; the
+  committed panel was deliberately not rebuilt (§9.2, `docs/FACTS.md` §7.8–7.9).
 - `argotech/data/meteo.py` — one Open-Meteo client for both paths (ERA5 archive for training,
   forecast for serving), same daily variables, disk-cached, with backoff.
 - `argotech/features/agronomic.py` — **the single feature builder**, called by both training and
