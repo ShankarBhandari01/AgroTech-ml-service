@@ -50,6 +50,14 @@ train = [
 ]
 dev = ["pytest", "ruff"]
 
+# Analysis notebooks only. Never in `dependencies`: the serving image has no use for a kernel, and
+# this is the same rule that keeps mlflow and torch out of it.
+notebook = [
+  "jupyterlab",
+  "ipykernel",
+  "matplotlib",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
