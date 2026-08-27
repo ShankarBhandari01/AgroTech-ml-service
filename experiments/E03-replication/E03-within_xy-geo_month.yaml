@@ -1,0 +1,39 @@
+# E03 — replicate E02's spatial/geo_month/within_xy result (linear +0.0404, boosted +0.0218).
+#
+# Identical to experiments/E02/E02-within_xy-geo_month.yaml (same config, same seed) — E03-*.result.json
+# here is that same single run, copied for reference. The replication itself is NOT another config
+# run: it is the site-level bootstrap in bootstrap_sites.py / bootstrap.result.json in this
+# directory, which resamples SITES (not rows, not seeds — see README.md for why a seed sweep is not
+# possible for this cell) and rebuilds the leave-one-cluster-out folds from scratch each time.
+name: E03-within_xy-geo_month
+target: within_xy            # level_z | within_y | within_xy | delta_z
+features:
+  - ndvi_z_peer
+  - ndmi
+  - evi
+  - vci
+  - rvi_z_peer
+  - et0_90
+  - dry_spell_30
+  - dry_spell_90
+  - diurnal_range_30
+  - radiation_90
+  - rain_30
+  - rain_90
+  - rain_anomaly_30
+  - rh_mean_30
+  - water_deficit_30
+  - water_satisfaction_30
+  - heat_stress_days
+  - gdd_90
+  - stage_kc
+  - elevation
+arms: [zero, persistence, climatology, linear, boosted]
+splits: [spatial, temporal]
+min_history: 3
+shrink: 0.0
+tau: -1.0                   # the incumbent's severe cut, so an "event" means the same thing
+seed: 42
+peer_key: geo_month         # leaky | cluster_month | geo_month
+lat_band: 20.0
+elev_band: 1000.0
