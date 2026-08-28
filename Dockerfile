@@ -18,6 +18,14 @@ RUN mkdir -p src/argotech && touch src/argotech/__init__.py && pip install --no-
 # ponytail: baked into the image, so a model update needs a rebuild. Pull from GCS at startup once
 # models ship more often than code.
 COPY artifacts/agronomic_risk.joblib artifacts/
+# `COPY src src` still copies argotech/lab/ into the build context — but pyproject.toml's
+# [tool.setuptools.packages.find] exclude drops it from what actually gets installed, and nothing
+# ever puts /app/src on sys.path at runtime (the app runs against the installed site-packages copy,
+# not the source tree sitting next to it). So `import argotech.lab` fails in the built image even
+# though the .py files are technically still on disk; verified with a built image, not just
+# asserted (`python -c "import argotech.lab"` fails, `import argotech.serving.main` succeeds). An explicit
+# per-directory COPY allowlist here would duplicate that boundary in a second place that also has to
+# be kept in sync — pyproject.toml is the one source of truth for what ships.
 COPY src src
 RUN pip install --no-cache-dir --no-deps .
 
