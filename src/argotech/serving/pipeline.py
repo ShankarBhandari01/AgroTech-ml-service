@@ -203,10 +203,23 @@ class PredictionsService:
         self.model_manager = model_manager
         self.data = data
         self.db = db
+        # Set by `_fetch_farmer_data`. Left as "provided" for callers that hand a farmer object to
+        # `predict_from_farmer_data` directly (coldstart's synthetic farmer) rather than going
+        # through the fetch — there is no payload/database choice to log on that path.
+        self.farmer_source = "provided"
 
     # ------------------------------------------------------------------ data
 
     async def _fetch_farmer_data(self):
+        # Expand/migrate/contract, Task 1: the deployed backend sends only `farmer_id`, so the
+        # database read stays the fallback for as long as that is true. A payload skips the backend
+        # schema entirely — no uuid check, no query — which is the point of sending one.
+        payload = getattr(self.data, "farmer", None)
+        if payload is not None:
+            self.farmer_source = "payload"
+            logger.info("field=%s farmer data source=payload", self.data.farmer_id)
+            return payload
+
         # farmer_profiles.user_id is a uuid column, so a malformed id reaches Postgres as a cast
         # error rather than an empty result — a 500 with the whole SQL statement in the response
         # body. Reject it here as the not-found it actually is.
@@ -226,6 +239,8 @@ class PredictionsService:
         )
         if not result:
             raise HTTPException(404, f"Farmer '{self.data.farmer_id}' not found in database.")
+        self.farmer_source = "database"
+        logger.info("field=%s farmer data source=database", self.data.farmer_id)
         return result
 
     # ------------------------------------------------------------------ inference
@@ -327,10 +342,10 @@ class PredictionsService:
         vulnerability = risk.assess_vulnerability(self._coping_signals(farmer))
         assessment = risk.assess_risk(hazard, exposure, vulnerability)
 
-        logger.info("field=%s crop=%s features=%s indices=%s model=%s -> %s risk=%s%% "
-                    "dominant=%s vegetation=%.3f", field_id, crop, feature_source, index_source,
-                    model_version, assessment.severity, assessment.risk_score, hazard.dominant,
-                    vegetation_hazard)
+        logger.info("field=%s crop=%s features=%s farmer_source=%s indices=%s model=%s -> %s "
+                    "risk=%s%% dominant=%s vegetation=%.3f", field_id, crop, feature_source,
+                    self.farmer_source, index_source, model_version, assessment.severity,
+                    assessment.risk_score, hazard.dominant, vegetation_hazard)
 
         # ---- audit row -----------------------------------------------------
         # Written before the response is returned so the id can be handed back: the agent app links
