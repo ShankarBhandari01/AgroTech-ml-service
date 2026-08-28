@@ -255,7 +255,11 @@ class PredictionsService:
         model, columns, artifact_version, bounds, stats, peer_ref = \
             self.model_manager.agronomic_model()
 
-        cached = store.read_latest_features(self.db, field_id) if self.db is not None else None
+        # Offloaded like every other blocking call in this method. Synchronous SQLAlchemy
+        # inside `async def` holds the event loop for its whole duration, so on a single
+        # uvicorn worker it serialises every concurrent request behind this one query.
+        cached = (await run_in_threadpool(store.read_latest_features, self.db, field_id)
+                  if self.db is not None else None)
         if cached:
             row, ctx, feature_source = cached["features"], cached["context"], "precomputed"
         else:
@@ -333,7 +337,11 @@ class PredictionsService:
         # its outcome report to this prediction, which is what turns advisories into training data.
         prediction_id = None
         if self.db is not None:
-            prediction_id = store.write_prediction(
+            # Offloaded for the same reason as the read above. This one is on the response
+            # path by design — the id is handed back so an outcome can be linked to it — so it
+            # stays synchronous with respect to the response, just not to the event loop.
+            prediction_id = await run_in_threadpool(
+                store.write_prediction,
                 self.db, field_id, model_version, feature_source, row, assessment,
                 probabilities.model_dump() if probabilities else None)
 
