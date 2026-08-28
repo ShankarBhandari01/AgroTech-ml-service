@@ -28,6 +28,7 @@ backend's `docker-compose.prod.yml` on a single GCE VM.
 - [Training](#training)
 - [Troubleshooting](#troubleshooting)
 - [Known issues](#known-issues)
+- [Two install surfaces](#two-install-surfaces)
 - [Repository layout](#repository-layout)
 
 ---
@@ -319,7 +320,7 @@ to `low: 1.0`, and the drought/disease/heat hazards carry the assessment on thei
 
 ```bash
 python3.11 -m venv .venv && source .venv/bin/activate
-pip install -e '.[train,dev]'
+pip install -e '.[lab,dev]'
 
 uvicorn argotech.serving.main:app --host 0.0.0.0 --port 8000 --reload
 ```
@@ -631,6 +632,32 @@ meaningful prediction without a location.
 | 9 | `has_irrigation` is not in the schema | Always 0, so vulnerability overstates every irrigated farm | Add to `farmers_ml_profiles` |
 | 10 | Images tagged by date | A tag does not identify the code that produced it | Tag with `$(git rev-parse --short HEAD)` |
 | 11 | No serving contract test | The Kotlin client's contract can drift silently | Golden-response test with mocked upstreams |
+
+---
+
+## Two install surfaces
+
+`serving` and `lab` share `config`, `data`, `domain`, `features` and `models.registry`; neither
+imports the other (`tests/test_import_boundary.py` enforces it). That one-directional dependency
+graph is what makes packaging them as two install surfaces cheap rather than a refactor:
+
+| | contents | installed by |
+| --- | --- | --- |
+| **serving surface** (default) | `config`, `data`, `domain`, `features`, `models.registry`, `jobs`, `serving` | `pip install .` — what the production image gets |
+| **research surface** | the above **plus** `lab` (panel, targets, peers, splits, arms, evaluate, run, export, embed, presto) | `pip install -e '.[lab]'` from a checkout |
+
+The production image cannot contain research code by construction: `argotech.lab` is excluded from
+the default install by `[tool.setuptools.packages.find]` in `pyproject.toml`, not by the Dockerfile
+remembering to leave it out.
+
+Where the non-code artifacts live, and why:
+
+- `experiments/` — **committed**. Results are the record; each carries a manifest hash, git SHA and
+  seed.
+- `notebooks/` — **committed, never packaged.** Reads committed CSVs and the panel.
+- `data/` — **gitignored**, one parquet whitelisted. A derived CSV in git is a second source of
+  truth that drifts.
+- `artifacts/` — the model bundle serving loads; produced only by `argotech.lab.export`.
 
 ---
 
