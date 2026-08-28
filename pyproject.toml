@@ -32,14 +32,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Training-only. Deliberately not in `dependencies`: torch is ~200 MB and the serving image has no
+# Research-only. Deliberately not in `dependencies`: torch is ~200 MB and the serving image has no
 # use for it. Frozen Presto embeddings are computed offline by `argotech.lab.embed`, so only a
 # training box — or the nightly precompute job, if embeddings are ever promoted — needs this extra.
 #
-# Presto itself is vendored (`models/_presto_vendored.py`) rather than installed: the published
+# Presto itself is vendored (`lab/_presto_vendored.py`) rather than installed: the published
 # package pins torch==2.0 and numpy==1.23.5 and imports earthengine-api at package init, so it
 # cannot be installed alongside this project even with --no-deps.
-train = [
+lab = [
   "pyarrow",   # parquet for the built training set
   "torch",     # frozen Presto encoder only; no training, no GPU
   "einops",    # required by the vendored Presto file
@@ -60,6 +60,13 @@ notebook = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+# The default install (`pip install .`) is the *serving surface*: config, data, domain, features,
+# models.registry, jobs, serving — everything the production image needs and nothing else.
+# `.[lab]` plus a source checkout (`pip install -e '.[lab]'`) is the *research surface*, adding
+# `argotech.lab` (panel, targets, peers, splits, arms, evaluate, run, export, embed, presto) on top.
+# The exclusion below is what makes that boundary real: it means the production image cannot
+# contain research code by construction, rather than by the Dockerfile remembering to leave it out.
+exclude = ["argotech.lab*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
@@ -67,7 +74,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 110
-# Vendored upstream (see the `train` extra above). It is kept byte-comparable to the Presto release
+# Vendored upstream (see the `lab` extra above). It is kept byte-comparable to the Presto release
 # so it can be re-vendored by diff; reformatting it would destroy that.
 extend-exclude = ["src/argotech/lab/_presto_vendored.py"]
 

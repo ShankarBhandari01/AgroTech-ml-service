@@ -491,7 +491,7 @@ leak from. See `docs/superpowers/specs/2026-08-26-two-way-demeaned-estimand-desi
 two are split.
 
 ```bash
-pip install -e '.[train]'
+pip install -e '.[lab]'
 
 python -m argotech.lab.panel --sites 32 --years 4                      # → data/training_set.parquet
 python -m argotech.lab.export experiments/export-production.yaml       # → artifacts/agronomic_risk.joblib
@@ -513,7 +513,7 @@ window off `date.today()`, so two builds made on different days are not a contro
 ### Frozen Presto embeddings (experimental)
 
 ```bash
-pip install -e '.[train]'                     # adds torch + einops, training-only
+pip install -e '.[lab]'                     # adds torch + einops, training-only
 python -m argotech.lab.embed --data data/training_set.parquet \
                              --out  data/presto_embeddings.parquet
 ```
