@@ -19,8 +19,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from argotech.lab import embeddings as emb
 from argotech.lab.panel import bands_history, collect_site, sample_sites
-from argotech.models import embeddings as emb
 
 EMBED_DIM = 128
 EMBED_PREFIX = "presto_"

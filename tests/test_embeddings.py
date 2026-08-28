@@ -12,7 +12,7 @@ import math
 import numpy as np
 import pytest
 
-from argotech.models.embeddings import (
+from argotech.lab.embeddings import (
     IDX_ELEVATION,
     IDX_ERA5_PRECIP,
     IDX_ERA5_TEMP,
@@ -132,7 +132,7 @@ def test_batches_are_grouped_so_every_item_shares_a_mask_pattern():
     Real samples violate that — a cloud gap in March is not a cloud gap in April — so bucketing is
     required, not an optimisation.
     """
-    from argotech.models.embeddings import batch_key
+    from argotech.lab.embeddings import batch_key
 
     a = np.zeros((NUM_TIMESTEPS, NUM_CHANNELS), dtype=np.float32)
     b = a.copy()
@@ -148,7 +148,7 @@ def test_end_to_end_embedding_is_finite_and_varies_with_input():
     pytest.importorskip("torch")
     from pathlib import Path
 
-    from argotech.models.embeddings import embed, load_encoder
+    from argotech.lab.embeddings import embed, load_encoder
 
     if not Path(".cache/presto/default_model.pt").exists():
         pytest.skip("Presto weights not fetched")
@@ -175,7 +175,7 @@ def test_bands_fill_the_optical_channels_in_prestos_order():
     Each band gets a distinct value so a swap between, say, B8 and B8A shows up as a mismatch
     rather than as a plausible-looking number in the wrong place.
     """
-    from argotech.models.embeddings import BAND_CHANNELS
+    from argotech.lab.embeddings import BAND_CHANNELS
 
     months = month_keys("2025-06-15")
     probe = {"b02": 0.02, "b03": 0.03, "b04": 0.04, "b05": 0.05, "b06": 0.06,

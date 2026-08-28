@@ -69,7 +69,7 @@ testpaths = ["tests"]
 line-length = 110
 # Vendored upstream (see the `train` extra above). It is kept byte-comparable to the Presto release
 # so it can be re-vendored by diff; reformatting it would destroy that.
-extend-exclude = ["src/argotech/models/_presto_vendored.py"]
+extend-exclude = ["src/argotech/lab/_presto_vendored.py"]
 
 [tool.ruff.lint]
 # Pinned rather than left to the default, so `ruff check` means the same thing here, in CI, and in
