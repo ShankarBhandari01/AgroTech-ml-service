@@ -18,10 +18,26 @@ RUN mkdir -p src/argotech && touch src/argotech/__init__.py && pip install --no-
 # ponytail: baked into the image, so a model update needs a rebuild. Pull from GCS at startup once
 # models ship more often than code.
 COPY artifacts/agronomic_risk.joblib artifacts/
+# `COPY src src` still copies argotech/lab/ into the build context — but pyproject.toml's
+# [tool.setuptools.packages.find] exclude drops it from what actually gets installed, and nothing
+# ever puts /app/src on sys.path at runtime (the app runs against the installed site-packages copy,
+# not the source tree sitting next to it). So `import argotech.lab` fails in the built image even
+# though the .py files are technically still on disk; verified with a built image, not just
+# asserted (`python -c "import argotech.lab"` fails, `import argotech.serving.main` succeeds). An explicit
+# per-directory COPY allowlist here would duplicate that boundary in a second place that also has to
+# be kept in sync — pyproject.toml is the one source of truth for what ships.
 COPY src src
 RUN pip install --no-cache-dir --no-deps .
 
-RUN useradd --system --create-home ml
+# `meteo.CACHE_DIR` and `sentinel`'s caches are relative paths under the working directory, and the
+# service runs unprivileged — so /app/.cache has to exist and be writable before the drop, or every
+# upstream response is re-fetched and the failure surfaces only as a warning:
+#   [meteo] archive 11.900,8.500 failed: [Errno 13] Permission denied: '.cache'
+# That is silent in the response: the climatology falls back to the observed 30-day total, so
+# `rain_anomaly_30` reads exactly 0.0 — "perfectly normal rainfall" — for a field in deficit.
+RUN useradd --system --create-home ml \
+    && mkdir -p /app/.cache \
+    && chown -R ml:ml /app/.cache
 USER ml
 
 EXPOSE 8000

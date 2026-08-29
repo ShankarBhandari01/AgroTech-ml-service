@@ -1,4 +1,5 @@
 import statistics
+from typing import Annotated
 
 from fastapi import APIRouter, Query
 from fastapi.concurrency import run_in_threadpool
@@ -11,8 +12,8 @@ router = APIRouter()
 
 @router.get("/predict/crop-health")
 async def get_crop_health(
-    latitude: float = Query(..., ge=-90, le=90),
-    longitude: float = Query(..., ge=-180, le=180),
+    latitude: Annotated[float, Query(ge=-90, le=90)],
+    longitude: Annotated[float, Query(ge=-180, le=180)],
 ) -> dict:
     """Crop Health Index for a field, from Sentinel-2 observations and the field's own history.
 

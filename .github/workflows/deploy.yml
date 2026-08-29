@@ -1,0 +1,208 @@
+# Build the inference image in CI, push it to Artifact Registry, then restart the `ml` service on
+# the GCE VM over SSH.
+#
+# The sibling of agri-saas-kotlin-backend's .github/workflows/deploy.yml, deliberately: same VM,
+# same registry, same compose stack, same Workload Identity Federation. Until this existed the ML
+# service was the only piece deployed by hand, which is how it ended up running an image that could
+# not query the schema the backend had already migrated.
+#
+# Secrets never pass through CI: /opt/agri/.env lives only on the VM, and this workflow just tells
+# compose which image tag to run. Rolling back is re-running an older tag, not a rebuild.
+#
+# Required GitHub repo variables (Settings > Secrets and variables > Actions > Variables) — the same
+# five the backend repo needs, set again here because Variables are per-repository:
+#   GCP_PROJECT_ID      farmerxential-backend
+#   GCP_PROJECT_NUMBER  numeric, from `gcloud projects describe <project> --format='value(projectNumber)'`
+#   GCP_REGION          europe-west2
+#   GCE_INSTANCE        lalishank
+#   GCE_ZONE            europe-west2-a
+# Auth is keyless via Workload Identity Federation — no service-account JSON in this repo.
+name: deploy
+
+# Only master deploys. Pushes to the working branch and PRs into master run tests and a Docker build
+# and stop there — they never need cloud credentials. The deploy steps are gated on the ref rather
+# than the event type, so a branch push cannot reach the VM.
+on:
+  push:
+    branches: [master, redesign/model-and-structure]
+  pull_request:
+    branches: [master]
+  # Rollback path: run this workflow with image_tag set to a tag already in Artifact Registry (any
+  # previous commit SHA). Test and build are skipped entirely, so putting the previous image back
+  # takes about a minute and cannot produce a different artifact than the one that was running.
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Existing image tag to redeploy (rollback). Leave empty to build this ref.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  id-token: write # required for Workload Identity Federation
+  deployments: write # lets the run record itself in the repo's Deployments tab
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # A hung `gcloud compute ssh` (no TTY on a runner) otherwise burns the full 6h default.
+    timeout-minutes: 30
+    env:
+      REGISTRY: ${{ vars.GCP_REGION }}-docker.pkg.dev
+    steps:
+      - uses: actions/checkout@v7
+
+      # Fail loudly and early on missing configuration. An unset variable silently expands to an
+      # empty string, so GCP_REGION alone produces REGISTRY="-docker.pkg.dev" and GCP_PROJECT_NUMBER
+      # produces a malformed workload_identity_provider path — which fails at Google's STS edge with
+      # an opaque error and no entry in the project's audit log. These are repo *Variables*, not
+      # Secrets, and they are NOT inherited from the backend repo.
+      - name: Check required repo variables
+        if: github.ref == 'refs/heads/master'
+        run: |
+          missing=""
+          for v in GCP_PROJECT_ID GCP_PROJECT_NUMBER GCP_REGION GCE_INSTANCE GCE_ZONE; do
+            eval "val=\${$v}"
+            [ -z "$val" ] && missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing required repo variable(s):$missing"
+            echo "Set them under Settings > Secrets and variables > Actions > Variables."
+            exit 1
+          fi
+          echo "All required variables are set. Registry: $REGISTRY"
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GCP_PROJECT_NUMBER: ${{ vars.GCP_PROJECT_NUMBER }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+          GCE_INSTANCE: ${{ vars.GCE_INSTANCE }}
+          GCE_ZONE: ${{ vars.GCE_ZONE }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      # No database service: config.py gives DATABASE_URL a default and SQLAlchemy's create_engine
+      # does not connect on import, so the suite runs without one. Anything that genuinely needs
+      # Postgres should bring its own container rather than making every run wait for one.
+      - name: Install
+        if: github.event.inputs.image_tag == ''
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . pytest
+
+      # Skipped on a rollback: the artifact already exists and was tested when it was built.
+      # Re-testing current source would prove nothing about an older image.
+      - name: Test
+        if: github.event.inputs.image_tag == ''
+        run: pytest tests -q
+
+      # linux/amd64 explicitly. The VM is x86; a runner is too, so this is belt and braces here —
+      # but it is the same command a developer runs on an arm64 Mac, where omitting it produces an
+      # image that pushes fine and then dies on the VM with an exec-format error.
+      #
+      # Runs before auth on purpose: a broken Dockerfile should fail here rather than behind a cloud
+      # credentials error, and a PR should catch it before the merge that would deploy it.
+      - name: Build image
+        if: github.event.inputs.image_tag == '' && github.ref != 'refs/heads/redesign/model-and-structure'
+        run: docker build --platform linux/amd64 -t "agri-ml:${{ github.sha }}" .
+
+      - uses: google-github-actions/auth@v3
+        if: github.ref == 'refs/heads/master'
+        with:
+          workload_identity_provider: projects/${{ vars.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github/providers/github
+          service_account: gh-deployer@${{ vars.GCP_PROJECT_ID }}.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@v3
+        if: github.ref == 'refs/heads/master'
+
+      - name: Push image
+        if: github.ref == 'refs/heads/master' && github.event.inputs.image_tag == ''
+        run: |
+          set -euo pipefail
+          IMG="$REGISTRY/${{ vars.GCP_PROJECT_ID }}/agri/ml:${{ github.sha }}"
+          gcloud auth configure-docker "$REGISTRY" -q
+          docker tag "agri-ml:${{ github.sha }}" "$IMG"
+          docker push "$IMG"
+          echo "IMG=$IMG" >> "$GITHUB_ENV"
+
+      # Rollback path. Confirms the tag actually exists BEFORE the VM is touched — deploying a
+      # typo'd tag would otherwise fail at `docker compose pull` with the old container already
+      # stopped, turning a rollback into an outage.
+      - name: Resolve rollback image
+        if: github.ref == 'refs/heads/master' && github.event.inputs.image_tag != ''
+        run: |
+          set -euo pipefail
+          IMG="$REGISTRY/${{ vars.GCP_PROJECT_ID }}/agri/ml:${{ github.event.inputs.image_tag }}"
+          if ! gcloud artifacts docker images describe "$IMG" >/dev/null 2>&1; then
+            echo "::error::Image not found in Artifact Registry: $IMG"
+            echo "Available tags:"
+            gcloud artifacts docker tags list \
+              "$REGISTRY/${{ vars.GCP_PROJECT_ID }}/agri/ml" --format='value(tag)' | tail -20
+            exit 1
+          fi
+          echo "Rolling back to $IMG"
+          echo "IMG=$IMG" >> "$GITHUB_ENV"
+
+      # Copied every deploy so a change to the script ships with the commit that made it, rather
+      # than drifting on the VM until someone remembers to update it by hand.
+      - name: Copy deploy script to VM
+        if: github.ref == 'refs/heads/master'
+        run: |
+          set -euo pipefail
+          # --quiet is load-bearing on a runner: without it gcloud prompts before generating the SSH
+          # key it needs for OS Login, and with no TTY the step hangs until the job times out.
+          gcloud compute scp scripts/deploy-ml.sh "${{ vars.GCE_INSTANCE }}:~/" \
+            --zone "${{ vars.GCE_ZONE }}" --project "${{ vars.GCP_PROJECT_ID }}" --quiet
+
+      # deploy-ml.sh persists ML_IMAGE to /opt/agri/.env, restarts the service and waits for the
+      # container to report healthy; it exits non-zero otherwise, which fails the job.
+      # Rollback: re-run this workflow with image_tag set to an older SHA.
+      - name: Deploy and verify
+        id: deploy
+        if: github.ref == 'refs/heads/master'
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${{ vars.GCE_INSTANCE }}" \
+            --zone "${{ vars.GCE_ZONE }}" --project "${{ vars.GCP_PROJECT_ID }}" --quiet \
+            --command "chmod +x ~/deploy-ml.sh && ~/deploy-ml.sh '$IMG' '$REGISTRY'"
+
+      # Populates the repo's Deployments tab, which is otherwise empty however many times we ship.
+      # always() so a failed deploy is recorded as failure rather than vanishing; the skipped check
+      # keeps non-master runs (where the deploy step never ran) out of the list entirely.
+      - name: Record deployment
+        if: always() && steps.deploy.conclusion != 'skipped'
+        # Bookkeeping must never turn a successful deploy into a red run. The service is already
+        # live by this point; a missing record is a reporting gap, not a deployment failure.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATE: ${{ steps.deploy.conclusion == 'success' && 'success' || 'failure' }}
+        run: |
+          set -uo pipefail
+          # required_contexts MUST be an explicit empty array. Omitted, GitHub requires every commit
+          # status on the SHA to be green first — including the `deploy` check belonging to this very
+          # run, which is still in_progress — so creation always 409s. It has to be real JSON, which
+          # `gh api -f` cannot express, hence --input.
+          body=$(jq -nc \
+            --arg ref "${{ github.sha }}" \
+            --arg desc "${IMG:-ml}" \
+            '{ref:$ref, environment:"production", description:$desc, auto_merge:false, required_contexts:[]}')
+          resp=$(printf '%s' "$body" | gh api "repos/${{ github.repository }}/deployments" \
+            --method POST --input - 2>&1) || true
+          id=$(printf '%s' "$resp" | jq -r '.id // empty' 2>/dev/null)
+          if [ -z "$id" ]; then
+            echo "::warning::Could not create a deployment record; the deploy itself is unaffected."
+            echo "$resp"
+            exit 0
+          fi
+          gh api "repos/${{ github.repository }}/deployments/$id/statuses" --method POST \
+            -f state="$STATE" \
+            -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f description="$STATE via GitHub Actions" >/dev/null
+          echo "Recorded deployment $id as $STATE"

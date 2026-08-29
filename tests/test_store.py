@@ -7,7 +7,7 @@ live one must be the same computation, and serialisation is the only place they 
 
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -17,7 +17,7 @@ from argotech.features.agronomic import FEATURE_COLUMNS
 
 
 def test_is_fresh():
-    now = datetime(2026, 8, 11, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
 
     assert is_fresh(now - timedelta(hours=1), now)
     assert is_fresh(now, now)                                    # just written

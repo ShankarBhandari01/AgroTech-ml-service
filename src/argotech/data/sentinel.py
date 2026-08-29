@@ -118,6 +118,30 @@ function evaluatePixel(s) {
 """
 
 
+# Normalised-difference indices are mathematically bounded to [-1, 1]. EVI is not a normalised
+# difference: its denominator `NIR + 6*Red - 7.5*Blue + 1` goes NEGATIVE when blue reflectance is
+# high (haze, thin cloud, failed atmospheric correction), and the evalscript ratio then blows up.
+# Measured on this repository's band cache (6,925 observations, 165 sites): 3.08% of denominators
+# are negative and 4.03% of EVI values fall outside [-1, 1], reaching 82.4. `data/training_set.parquet`
+# carries the same contamination -- 2.63% of rows, range -32.4 .. 82.4 -- so every model trained on
+# `evi` has been fed values two orders of magnitude out of range.
+#
+# The out-of-range value is set to NaN, not clipped: with a negative denominator over a green canopy
+# the ratio is negative, so clipping would report a cloudy pixel over a HEALTHY field as -1, "worst
+# possible vegetation". That is the same failure `data/meteo.py` records for a missing ET0 read as
+# zero. Only the offending index is NaN'd -- the interval is kept, because dropping it would discard
+# a perfectly good NDVI along with the bad EVI.
+_INDEX_RANGE = {"ndvi": (-1.0, 1.0), "ndwi": (-1.0, 1.0), "ndmi": (-1.0, 1.0), "evi": (-1.0, 1.0)}
+
+
+def _validate_index(key: str, value):
+    lo_hi = _INDEX_RANGE.get(key)
+    if lo_hi is None or value is None:
+        return value
+    lo, hi = lo_hi
+    return value if lo <= value <= hi else float("nan")
+
+
 class SentinelClient:
     def __init__(self) -> None:
         self._token: str | None = None
@@ -245,6 +269,7 @@ class SentinelClient:
                 outputs = iv.get("outputs", {})
                 values = {k: self._mean(outputs, k) for k in keys}
                 if all(v is not None for v in values.values()):
+                    values = {k: _validate_index(k, v) for k, v in values.items()}
                     values["sensing_date"] = str(iv.get("interval", {}).get("to", ""))[:10]
                     out.append(values)
             return out

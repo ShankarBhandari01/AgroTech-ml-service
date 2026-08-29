@@ -1,29 +1,38 @@
 import logging
-
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
 from types import SimpleNamespace
 
-from argotech.serving.schemas.request import (
-    FarmerPredictionRequest, 
-    CoordinatesColdStartPredictionRequest
-)
-from argotech.serving.schemas.response import PredictionResponse
-from argotech.serving.deps import get_model_manager
-from argotech.models.registry import ModelManager
-from argotech.data.db import get_db
+from fastapi import APIRouter, HTTPException
+
+from argotech.serving.deps import DbSessionDep, ModelManagerDep
 from argotech.serving.pipeline import PredictionsService
+from argotech.serving.schemas.request import CoordinatesColdStartPredictionRequest, FarmerPredictionRequest
+from argotech.serving.schemas.response import PredictionResponse
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _summary(prediction: PredictionResponse) -> dict:
+    """The response fields worth a log line. The full body is ~40 fields of nested detail, which
+    belongs in the stored prediction row, not in the log."""
+    return {
+        "prediction_id": prediction.prediction_id,
+        "model_version": prediction.model_version,
+        "feature_source": prediction.feature_source,
+        "risk_level": prediction.inference.risk_level,
+        "risk_score_percent": prediction.risk_score_percent,
+        "dominant_hazard": prediction.inference.dominant_hazard,
+        "probabilities": prediction.probabilities.model_dump(),
+    }
+
+
 @router.post("/predict/farmer", response_model=PredictionResponse)
 async def predict_farmer(
         payload: FarmerPredictionRequest,
-        model_manager: ModelManager = Depends(get_model_manager),
-        db: Session = Depends(get_db)
+        model_manager: ModelManagerDep,
+        db: DbSessionDep,
 ):
+    logger.info("predict/farmer request: %s", payload.model_dump())
     try:
         predictions_service = PredictionsService(
             model_manager=model_manager,
@@ -31,33 +40,34 @@ async def predict_farmer(
             db=db
         )
         prediction = await predictions_service.predict()
+        logger.info("predict/farmer response: %s", _summary(prediction))
         return prediction
 
     except HTTPException:
         raise
-    except Exception:
+    except Exception as e:
         # Log the detail, return a generic message: str(e) on a SQLAlchemy error is the entire
         # statement plus parameters, and this response crosses a service boundary.
         logger.exception("predict/farmer failed for %s", payload.farmer_id)
-        raise HTTPException(status_code=500, detail="Prediction failed. See ml service logs.")
+        raise HTTPException(status_code=500,
+                            detail="Prediction failed. See ml service logs.") from e
 
 
 @router.post("/predict/coldstart", response_model=PredictionResponse)
 async def predict_coldstart(
         payload: CoordinatesColdStartPredictionRequest,
-        model_manager: ModelManager = Depends(get_model_manager),
-        db: Session = Depends(get_db)
+        model_manager: ModelManagerDep,
+        db: DbSessionDep,
 ):
     """
     Executes Zero-Cold-Start Remote Sensing & Microclimate ML Inference directly from GPS coordinates
     (Latitude, Longitude) without requiring pre-existing farmer database records.
     """
+    logger.info("predict/coldstart request: %s", payload.model_dump())
     try:
         # Construct synthetic farmer request wrapper
         farmer_req = FarmerPredictionRequest(
-            farmer_id=f"coldstart-{payload.latitude:.4f}-{payload.longitude:.4f}",
-            model_name=payload.model_name,
-            model_alias=payload.model_alias
+            farmer_id=f"coldstart-{payload.latitude:.4f}-{payload.longitude:.4f}"
         )
         
         predictions_service = PredictionsService(
@@ -94,10 +104,13 @@ async def predict_coldstart(
         )
 
         prediction = await predictions_service.predict_from_farmer_data(mock_farmer_data)
+        logger.info("predict/coldstart response: %s", _summary(prediction))
         return prediction
 
     except HTTPException:
         raise
-    except Exception:
-        logger.exception("predict/coldstart failed for (%s, %s)", payload.latitude, payload.longitude)
-        raise HTTPException(status_code=500, detail="Prediction failed. See ml service logs.")
+    except Exception as e:
+        logger.exception("predict/coldstart failed for (%s, %s)",
+                         payload.latitude, payload.longitude)
+        raise HTTPException(status_code=500,
+                            detail="Prediction failed. See ml service logs.") from e

@@ -2,6 +2,7 @@
 # .gitignore, which excludes `venv/` but not `.venv/` — a 1 GB upload on every build.
 .venv/
 venv/
+.env.env.bak
 __pycache__/
 **/__pycache__/
 *.pyc
@@ -13,7 +14,11 @@ __pycache__/
 .env
 
 .cache/
-data/
+# Anchored. This file uses gitignore semantics, so unanchored `data/` matched `src/argotech/data/`
+# too and the package never reached Cloud Build at all — the built image imported fine until
+# `main.py:14` and then died on `No module named 'argotech.data'`. .dockerignore had the identical
+# bug; fixing only that one changed nothing, because this file decides what is uploaded.
+/data/
 mlruns/
 mlflow.db
 *.csv

@@ -1,0 +1,1222 @@
+{
+  "config": {
+    "name": "E04-within_xy-lat90-elev1000",
+    "target": "within_xy",
+    "features": [
+      "ndvi_z_peer",
+      "ndmi",
+      "evi",
+      "vci",
+      "rvi_z_peer",
+      "et0_90",
+      "dry_spell_30",
+      "dry_spell_90",
+      "diurnal_range_30",
+      "radiation_90",
+      "rain_30",
+      "rain_90",
+      "rain_anomaly_30",
+      "rh_mean_30",
+      "water_deficit_30",
+      "water_satisfaction_30",
+      "heat_stress_days",
+      "gdd_90",
+      "stage_kc",
+      "elevation"
+    ],
+    "arms": [
+      "zero",
+      "persistence",
+      "climatology",
+      "linear",
+      "boosted"
+    ],
+    "splits": [
+      "spatial"
+    ],
+    "min_history": 3,
+    "shrink": 0.0,
+    "tau": -1.0,
+    "seed": 42,
+    "peer_key": "geo_month",
+    "lat_band": 90.0,
+    "elev_band": 1000.0
+  },
+  "provenance": {
+    "git_sha": "db654a6",
+    "dirty": false,
+    "seed": 42,
+    "scored_rows": 4230,
+    "content_hash": "6c832dc2741766af8a74b5fd2dd39cab4d4557fdba811ecc728a8a6b8bf28aeb",
+    "rows": 4596,
+    "sites": 122,
+    "clusters": [
+      "Benue_River_Basin",
+      "Kaduna_Grain_Belt",
+      "Kano_Sudan_Savannah",
+      "Kenya_Rift_Valley"
+    ],
+    "date_min": "2022-09-10",
+    "date_max": "2026-06-21",
+    "code_version": "db654a6"
+  },
+  "folds": [
+    {
+      "split": "spatial",
+      "fold": "Benue_River_Basin",
+      "peer_coverage": 1.0,
+      "arms": {
+        "zero": {
+          "net_benefit": 0.0,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": 0.46066579877254976,
+              "visit_all": 0.46066579877254976,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": 0.430702787593247,
+              "visit_all": 0.430702787593247,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": 0.39721471627520266,
+              "visit_all": 0.39721471627520266,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": 0.0,
+              "visit_all": 0.35954063604240283,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": 0.0,
+              "visit_all": 0.26804644119131754,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": 0.0,
+              "visit_all": 0.14605418138987042,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": 0.0,
+              "visit_all": -0.02473498233215543,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.4876325088339223,
+          "spearman": 0.0,
+          "event_rate": 0.4876325088339223,
+          "n": 566
+        },
+        "persistence": {
+          "net_benefit": 0.2318904593639576,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": 0.38636786312069926,
+              "visit_all": 0.46066579877254976,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": 0.32332155477031804,
+              "visit_all": 0.430702787593247,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": 0.2716690916649345,
+              "visit_all": 0.39721471627520266,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": 0.2318904593639576,
+              "visit_all": 0.35954063604240283,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": 0.15371024734982333,
+              "visit_all": 0.26804644119131754,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": 0.07714958775029446,
+              "visit_all": 0.14605418138987042,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": 0.02650176678445229,
+              "visit_all": -0.02473498233215543,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.52,
+          "spearman": 0.24680009086650945,
+          "event_rate": 0.4876325088339223,
+          "n": 566
+        },
+        "climatology": {
+          "net_benefit": 0.0,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": 0.46066579877254976,
+              "visit_all": 0.46066579877254976,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": 0.430702787593247,
+              "visit_all": 0.430702787593247,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": 0.0,
+              "visit_all": 0.39721471627520266,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": 0.0,
+              "visit_all": 0.35954063604240283,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": 0.0,
+              "visit_all": 0.26804644119131754,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": 0.0,
+              "visit_all": 0.14605418138987042,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": 0.0,
+              "visit_all": -0.02473498233215543,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.4876325088339223,
+          "spearman": 0.0,
+          "event_rate": 0.4876325088339223,
+          "n": 566
+        },
+        "linear": {
+          "net_benefit": 0.1267667844522968,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": 0.4430909429049656,
+              "visit_all": 0.46066579877254976,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": 0.36101295641931685,
+              "visit_all": 0.430702787593247,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": 0.2363334026189981,
+              "visit_all": 0.39721471627520266,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": 0.1267667844522968,
+              "visit_all": 0.35954063604240283,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": 0.030792529025744572,
+              "visit_all": 0.26804644119131754,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": 0.014723203769140162,
+              "visit_all": 0.14605418138987042,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": -0.001766784452296822,
+              "visit_all": -0.02473498233215543,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.48,
+          "spearman": 0.2279398302225783,
+          "event_rate": 0.4876325088339223,
+          "n": 566
+        },
+        "boosted": {
+          "net_benefit": 0.07376325088339222,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": 0.1987167565557002,
+              "visit_all": 0.46066579877254976,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": 0.13113466823714173,
+              "visit_all": 0.430702787593247,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": 0.09790064435668261,
+              "visit_all": 0.39721471627520266,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": 0.07376325088339222,
+              "visit_all": 0.35954063604240283,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": 0.04467440686521958,
+              "visit_all": 0.26804644119131754,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": 0.03180212014134275,
+              "visit_all": 0.14605418138987042,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": 0.015901060070671377,
+              "visit_all": -0.02473498233215543,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.68,
+          "spearman": 0.18567863070192725,
+          "event_rate": 0.4876325088339223,
+          "n": 566
+        }
+      }
+    },
+    {
+      "split": "spatial",
+      "fold": "Kaduna_Grain_Belt",
+      "peer_coverage": 1.0,
+      "arms": {
+        "zero": {
+          "net_benefit": 0.0,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": 0.030125649694706554,
+              "visit_all": 0.030125649694706554,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": -0.02375625865558753,
+              "visit_all": -0.02375625865558753,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": -0.08397721504709268,
+              "visit_all": -0.08397721504709268,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": 0.0,
+              "visit_all": -0.15172579098753597,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": 0.0,
+              "visit_all": -0.31625804684289827,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": 0.0,
+              "visit_all": -0.5356343879833814,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": 0.0,
+              "visit_all": -0.8427612655800576,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.07861936720997123,
+          "spearman": 0.0,
+          "event_rate": 0.07861936720997123,
+          "n": 1043
+        },
+        "persistence": {
+          "net_benefit": -0.07238734419942472,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": 0.024171166170459703,
+              "visit_all": 0.030125649694706554,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": -0.02279748588473421,
+              "visit_all": -0.02375625865558753,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": -0.05769556144605495,
+              "visit_all": -0.08397721504709268,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": -0.07238734419942472,
+              "visit_all": -0.15172579098753597,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": -0.053554307629091906,
+              "visit_all": -0.31625804684289827,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": -0.026206455736657083,
+              "visit_all": -0.5356343879833814,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": -0.02109300095877277,
+              "visit_all": -0.8427612655800576,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.2,
+          "spearman": 0.34972040077535227,
+          "event_rate": 0.07861936720997123,
+          "n": 1043
+        },
+        "climatology": {
+          "net_benefit": 0.0,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": 0.030125649694706554,
+              "visit_all": 0.030125649694706554,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": -0.02375625865558753,
+              "visit_all": -0.02375625865558753,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": -0.08397721504709268,
+              "visit_all": -0.08397721504709268,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": 0.0,
+              "visit_all": -0.15172579098753597,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": 0.0,
+              "visit_all": -0.31625804684289827,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": 0.0,
+              "visit_all": -0.5356343879833814,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": 0.0,
+              "visit_all": -0.8427612655800576,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.07861936720997123,
+          "spearman": 0.0,
+          "event_rate": 0.07861936720997123,
+          "n": 1043
+        },
+        "linear": {
+          "net_benefit": -0.010306807286673058,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": 0.030125649694706554,
+              "visit_all": 0.030125649694706554,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": -0.026312986044529668,
+              "visit_all": -0.02375625865558753,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": -0.05075855845693983,
+              "visit_all": -0.08397721504709268,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": -0.010306807286673058,
+              "visit_all": -0.15172579098753597,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": -0.0031502533899465833,
+              "visit_all": -0.31625804684289827,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": -0.0019175455417066159,
+              "visit_all": -0.5356343879833814,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": -0.0009587727708533077,
+              "visit_all": -0.8427612655800576,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.16,
+          "spearman": 0.29766963876284025,
+          "event_rate": 0.07861936720997123,
+          "n": 1043
+        },
+        "boosted": {
+          "net_benefit": -0.004554170661553213,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": 0.019932381288792447,
+              "visit_all": 0.030125649694706554,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": 0.012357515713220411,
+              "visit_all": -0.02375625865558753,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": 0.003947887879984208,
+              "visit_all": -0.08397721504709268,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": -0.004554170661553213,
+              "visit_all": -0.15172579098753597,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": -0.010272565401999728,
+              "visit_all": -0.31625804684289827,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": -0.014381591562799619,
+              "visit_all": -0.5356343879833814,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": -0.02205177372962608,
+              "visit_all": -0.8427612655800576,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.12,
+          "spearman": 0.20207852130489465,
+          "event_rate": 0.07861936720997123,
+          "n": 1043
+        }
+      }
+    },
+    {
+      "split": "spatial",
+      "fold": "Kano_Sudan_Savannah",
+      "peer_coverage": 1.0,
+      "arms": {
+        "zero": {
+          "net_benefit": 0.0,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": -0.0015492191098270755,
+              "visit_all": -0.0015492191098270755,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": -0.05719084239370636,
+              "visit_all": -0.05719084239370636,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": -0.11937853900510084,
+              "visit_all": -0.11937853900510084,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": 0.0,
+              "visit_all": -0.18933969769291964,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": 0.0,
+              "visit_all": -0.3592453687919082,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": 0.0,
+              "visit_all": -0.5857862635905596,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": 0.0,
+              "visit_all": -0.9029435163086714,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.04852824184566428,
+          "spearman": 0.0,
+          "event_rate": 0.04852824184566428,
+          "n": 1257
+        },
+        "persistence": {
+          "net_benefit": -0.11714399363564042,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": -0.0010467696688020792,
+              "visit_all": -0.0015492191098270755,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": -0.04799787854680457,
+              "visit_all": -0.05719084239370636,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": -0.09785202863961816,
+              "visit_all": -0.11937853900510084,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": -0.11714399363564042,
+              "visit_all": -0.18933969769291964,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": -0.0818274803954995,
+              "visit_all": -0.3592453687919082,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": -0.04985415009281359,
+              "visit_all": -0.5857862635905596,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": -0.024661893396976928,
+              "visit_all": -0.9029435163086714,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.24,
+          "spearman": 0.26259294089419166,
+          "event_rate": 0.04852824184566428,
+          "n": 1257
+        },
+        "climatology": {
+          "net_benefit": 0.0,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": -0.0015492191098270755,
+              "visit_all": -0.0015492191098270755,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": -0.05719084239370636,
+              "visit_all": -0.05719084239370636,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": 0.0,
+              "visit_all": -0.11937853900510084,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": 0.0,
+              "visit_all": -0.18933969769291964,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": 0.0,
+              "visit_all": -0.3592453687919082,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": 0.0,
+              "visit_all": -0.5857862635905596,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": 0.0,
+              "visit_all": -0.9029435163086714,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.04852824184566428,
+          "spearman": 0.0,
+          "event_rate": 0.04852824184566428,
+          "n": 1257
+        },
+        "linear": {
+          "net_benefit": -0.004176610978520286,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": -0.0015492191098270755,
+              "visit_all": -0.0015492191098270755,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": -0.056483691328560064,
+              "visit_all": -0.05719084239370636,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": -0.08484252889700034,
+              "visit_all": -0.11937853900510084,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": -0.004176610978520286,
+              "visit_all": -0.18933969769291964,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": -0.0005682463916354132,
+              "visit_all": -0.3592453687919082,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": -0.001060726597719438,
+              "visit_all": -0.5857862635905596,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": -0.0007955449482895784,
+              "visit_all": -0.9029435163086714,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.2,
+          "spearman": 0.17276323583245362,
+          "event_rate": 0.04852824184566428,
+          "n": 1257
+        },
+        "boosted": {
+          "net_benefit": -0.005568814638027049,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": 0.001884185403843738,
+              "visit_all": -0.0015492191098270755,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": -0.0036241492088747466,
+              "visit_all": -0.05719084239370636,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": -0.005381627591370678,
+              "visit_all": -0.11937853900510084,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": -0.005568814638027049,
+              "visit_all": -0.18933969769291964,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": -0.003977724741447892,
+              "visit_all": -0.3592453687919082,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": -0.001060726597719438,
+              "visit_all": -0.5857862635905596,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": 0.0,
+              "visit_all": -0.9029435163086714,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.08,
+          "spearman": 0.25258519683169894,
+          "event_rate": 0.04852824184566428,
+          "n": 1257
+        }
+      }
+    },
+    {
+      "split": "spatial",
+      "fold": "Kenya_Rift_Valley",
+      "peer_coverage": 0.47151681537405626,
+      "arms": {
+        "zero": {
+          "net_benefit": 0.0,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": 0.24992963692654094,
+              "visit_all": 0.24992963692654094,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": 0.20825906120023766,
+              "visit_all": 0.20825906120023766,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": 0.16168606480025163,
+              "visit_all": 0.16168606480025163,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": 0.0,
+              "visit_all": 0.10929144385026737,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": 0.0,
+              "visit_all": -0.017952635599694455,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": 0.0,
+              "visit_all": -0.18761140819964356,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": 0.0,
+              "visit_all": -0.42513368983957217,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.2874331550802139,
+          "spearman": 0.0,
+          "event_rate": 0.2874331550802139,
+          "n": 748
+        },
+        "persistence": {
+          "net_benefit": 0.08455882352941177,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": 0.13791162397973541,
+              "visit_all": 0.24992963692654094,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": 0.11749851455733809,
+              "visit_all": 0.20825906120023766,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": 0.09979553318653664,
+              "visit_all": 0.16168606480025163,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": 0.08455882352941177,
+              "visit_all": 0.10929144385026737,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": 0.05366692131398014,
+              "visit_all": -0.017952635599694455,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": 0.02005347593582886,
+              "visit_all": -0.18761140819964356,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": -0.02406417112299465,
+              "visit_all": -0.42513368983957217,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.32,
+          "spearman": 0.29354711337010714,
+          "event_rate": 0.2874331550802139,
+          "n": 748
+        },
+        "climatology": {
+          "net_benefit": 0.0,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": 0.24992963692654094,
+              "visit_all": 0.24992963692654094,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": 0.20825906120023766,
+              "visit_all": 0.20825906120023766,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": 0.0,
+              "visit_all": 0.16168606480025163,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": 0.0,
+              "visit_all": 0.10929144385026737,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": 0.0,
+              "visit_all": -0.017952635599694455,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": 0.0,
+              "visit_all": -0.18761140819964356,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": 0.0,
+              "visit_all": -0.42513368983957217,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.2874331550802139,
+          "spearman": 0.0,
+          "event_rate": 0.2874331550802139,
+          "n": 748
+        },
+        "linear": {
+          "net_benefit": 0.04913101604278076,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": 0.19814241486068113,
+              "visit_all": 0.24992963692654094,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": 0.14052287581699346,
+              "visit_all": 0.20825906120023766,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": 0.09098773199119219,
+              "visit_all": 0.16168606480025163,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": 0.04913101604278076,
+              "visit_all": 0.10929144385026737,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": 0.017188693659281884,
+              "visit_all": -0.017952635599694455,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": -0.005793226381461687,
+              "visit_all": -0.18761140819964356,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": -0.009358288770053479,
+              "visit_all": -0.42513368983957217,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.36,
+          "spearman": 0.15348033144121287,
+          "event_rate": 0.2874331550802139,
+          "n": 748
+        },
+        "boosted": {
+          "net_benefit": 0.023395721925133686,
+          "decision_curve": [
+            {
+              "threshold": 0.05,
+              "model": 0.12229102167182664,
+              "visit_all": 0.24992963692654094,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.1,
+              "model": 0.07635175282234105,
+              "visit_all": 0.20825906120023766,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.15,
+              "model": 0.0489147530670022,
+              "visit_all": 0.16168606480025163,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.2,
+              "model": 0.023395721925133686,
+              "visit_all": 0.10929144385026737,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.3,
+              "model": -0.014514896867838044,
+              "visit_all": -0.017952635599694455,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.4,
+              "model": -0.046791443850267386,
+              "visit_all": -0.18761140819964356,
+              "visit_none": 0.0
+            },
+            {
+              "threshold": 0.5,
+              "model": -0.05080213903743316,
+              "visit_all": -0.42513368983957217,
+              "visit_none": 0.0
+            }
+          ],
+          "precision_at_25": 0.16,
+          "spearman": -0.04359937052996261,
+          "event_rate": 0.2874331550802139,
+          "n": 748
+        }
+      }
+    }
+  ],
+  "summary": {
+    "spatial": {
+      "zero": {
+        "net_benefit_mean": 0.0,
+        "precision_at_25_mean": 0.2255533182424429,
+        "spearman_mean": 0.0,
+        "net_benefit_ci": [
+          0.0,
+          0.0
+        ],
+        "precision_at_25_ci": [
+          0.06357380452781776,
+          0.3875328319570681
+        ],
+        "spearman_ci": [
+          0.0,
+          0.0
+        ],
+        "peer_coverage_mean": 0.867879203843514,
+        "folds_scored": 4,
+        "folds_attempted": 4,
+        "skipped_folds": []
+      },
+      "persistence": {
+        "net_benefit_mean": 0.03172948626457606,
+        "precision_at_25_mean": 0.32,
+        "spearman_mean": 0.28816513647654013,
+        "net_benefit_ci": [
+          -0.09476566891753258,
+          0.1582246414466847
+        ],
+        "precision_at_25_ci": [
+          0.21999999999999997,
+          0.45
+        ],
+        "spearman_ci": [
+          0.2546965158803506,
+          0.3279385358050621
+        ],
+        "peer_coverage_mean": 0.867879203843514,
+        "folds_scored": 4,
+        "folds_attempted": 4,
+        "skipped_folds": []
+      },
+      "climatology": {
+        "net_benefit_mean": 0.0,
+        "precision_at_25_mean": 0.2255533182424429,
+        "spearman_mean": 0.0,
+        "net_benefit_ci": [
+          0.0,
+          0.0
+        ],
+        "precision_at_25_ci": [
+          0.06357380452781776,
+          0.3875328319570681
+        ],
+        "spearman_ci": [
+          0.0,
+          0.0
+        ],
+        "peer_coverage_mean": 0.867879203843514,
+        "folds_scored": 4,
+        "folds_attempted": 4,
+        "skipped_folds": []
+      },
+      "linear": {
+        "net_benefit_mean": 0.040353595557471054,
+        "precision_at_25_mean": 0.30000000000000004,
+        "spearman_mean": 0.21296325906477123,
+        "net_benefit_ci": [
+          -0.007241709132596672,
+          0.09403093559459252
+        ],
+        "precision_at_25_ci": [
+          0.18,
+          0.42
+        ],
+        "spearman_ci": [
+          0.16312178363683325,
+          0.2664430380302436
+        ],
+        "peer_coverage_mean": 0.867879203843514,
+        "folds_scored": 4,
+        "folds_attempted": 4,
+        "skipped_folds": []
+      },
+      "boosted": {
+        "net_benefit_mean": 0.02175899687723641,
+        "precision_at_25_mean": 0.26,
+        "spearman_mean": 0.14918574457713957,
+        "net_benefit_ci": [
+          -0.0050614926497901305,
+          0.05418389549715586
+        ],
+        "precision_at_25_ci": [
+          0.1,
+          0.54
+        ],
+        "spearman_ci": [
+          0.017820102428751705,
+          0.23585855529925603
+        ],
+        "peer_coverage_mean": 0.867879203843514,
+        "folds_scored": 4,
+        "folds_attempted": 4,
+        "skipped_folds": []
+      }
+    }
+  }
+}

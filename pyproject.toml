@@ -21,6 +21,9 @@ dependencies = [
   "requests",
   "pandas",
   "scikit-learn==1.6.1",
+  # Already present transitively via scikit-learn; declared because training imports spearmanr
+  # directly. Unpinned: only `scipy.stats.spearmanr` is used and its contract has been stable.
+  "scipy",
   "numpy==2.0.2",
   "joblib==1.5.3",
   "opentelemetry-sdk==1.41.1",
@@ -29,26 +32,67 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Training-only. Deliberately not in `dependencies`: torch is ~200 MB and the serving image has no
-# use for it. Frozen Presto embeddings are computed offline by `argotech.training.embed`, so only a
+# Research-only. Deliberately not in `dependencies`: torch is ~200 MB and the serving image has no
+# use for it. Frozen Presto embeddings are computed offline by `argotech.lab.presto.embed`, so only a
 # training box — or the nightly precompute job, if embeddings are ever promoted — needs this extra.
 #
-# Presto itself is vendored (`models/_presto_vendored.py`) rather than installed: the published
+# Presto itself is vendored (`lab/presto/_presto_vendored.py`) rather than installed: the published
 # package pins torch==2.0 and numpy==1.23.5 and imports earthengine-api at package init, so it
 # cannot be installed alongside this project even with --no-deps.
-train = [
+lab = [
   "pyarrow",   # parquet for the built training set
   "torch",     # frozen Presto encoder only; no training, no GPU
   "einops",    # required by the vendored Presto file
+  "pyyaml",    # experiment configs; an experiment is a file, not a flag
+  # Local file store only — mlruns/ plus the sqlite backend already on disk. No tracking server.
+  # Here for two things the paper needs: run comparison across arms, and a staged model registry.
+  "mlflow",
 ]
 dev = ["pytest", "ruff"]
 
+# Analysis notebooks only. Never in `dependencies`: the serving image has no use for a kernel, and
+# this is the same rule that keeps mlflow and torch out of it.
+notebook = [
+  "jupyterlab",
+  "ipykernel",
+  "matplotlib",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
+# The default install (`pip install .`) is the *serving surface*: config, data, domain, features,
+# models.registry, jobs, serving — everything the production image needs and nothing else.
+# `.[lab]` plus a source checkout (`pip install -e '.[lab]'`) is the *research surface*, adding
+# `argotech.lab` (panel/, estimand/, eval/, arms/, presto/, run) on top.
+# The exclusion below is what makes that boundary real: it means the production image cannot
+# contain research code by construction, rather than by the Dockerfile remembering to leave it out.
+exclude = ["argotech.lab*"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 110
+# Vendored upstream (see the `lab` extra above). It is kept byte-comparable to the Presto release
+# so it can be re-vendored by diff; reformatting it would destroy that.
+extend-exclude = ["src/argotech/lab/presto/_presto_vendored.py"]
+
+[tool.ruff.lint]
+# Pinned rather than left to the default, so `ruff check` means the same thing here, in CI, and in
+# whatever editor is attached. Everything selected here currently passes at zero.
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "ASYNC", "BLE", "PIE", "FURB", "RUF"]
+
+ignore = [
+  # `value != value` is this codebase's NaN test, used identically in the feature builder, the
+  # embedding packer and the training set. It is deliberate, not a mistaken self-comparison.
+  "PLR0124",
+]
+
+# Deliberately *not* selected:
+#
+# DTZ — naive-datetime rules. `store.py` stores and compares naive UTC timestamps ("Naive
+# timestamps are assumed UTC"), and Postgres `timestamp without time zone` is the column type
+# backing it. Adopting DTZ means migrating the column, the freshness comparison and the outcome
+# join together; it is a real piece of work, not a lint sweep, so it stays visible as a TODO here
+# rather than as 8 permanently-suppressed warnings.

@@ -29,30 +29,55 @@ That belongs in a manual or nightly job, not in CI.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
 import pytest
+import requests
 from fastapi.testclient import TestClient
 
 from argotech.data import meteo
-from argotech.data.sentinel import sentinel_client
 from argotech.data.db import get_db
+from argotech.data.sentinel import sentinel_client
 from argotech.domain import risk
+from argotech.serving import pipeline
 from argotech.serving.main import app
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
+# 14 days of moderate leaf wetness: 12 wet hours at 20 °C is DSV 1 under Wallin's 15.1-26.6 °C band,
+# so 14 accumulated, below the spray threshold of 18. Deliberately non-zero — `_leaf_wetness` used to
+# be left unstubbed, and on a machine without network it returns `[]`, which is a *zero* disease
+# hazard that no assertion could distinguish from a correctly computed one.
+LEAF_WETNESS_DAYS = [(20.0, 12)] * 14
+
 
 @pytest.fixture
 def client(monkeypatch):
-    """The app with its network and database edges replaced, and nothing else."""
+    """The app with its network and database edges replaced, and nothing else.
+
+    Every upstream is stubbed, and then `requests` itself is broken, so a newly added live call
+    fails loudly instead of silently returning empty and degrading the assessment. That is not
+    belt-and-braces: `fetch_sar_history` and `_leaf_wetness` were both missing from this list, both
+    returned `[]` without credentials, and the radar features and the whole disease term went to
+    zero — which is precisely the regression this suite exists to catch.
+    """
     payload = json.loads((FIXTURES / "meteo_recent.json").read_text())
     history = json.loads((FIXTURES / "sentinel_history.json").read_text())
+    sar = json.loads((FIXTURES / "sentinel_sar_history.json").read_text())
 
     monkeypatch.setattr(meteo, "fetch_recent", lambda *a, **k: payload)
     monkeypatch.setattr(meteo, "climatological_rain_30", lambda *a, **k: 95.0)
     monkeypatch.setattr(sentinel_client, "fetch_history", lambda *a, **k: history)
+    monkeypatch.setattr(sentinel_client, "fetch_sar_history", lambda *a, **k: sar)
+    monkeypatch.setattr(pipeline, "_leaf_wetness", lambda *a, **k: list(LEAF_WETNESS_DAYS))
+
+    def _no_network(*a, **k):
+        raise AssertionError(f"live HTTP call from a hermetic test: {a[:1]}")
+
+    for verb in ("get", "post", "put", "request"):
+        monkeypatch.setattr(requests, verb, _no_network)
 
     app.dependency_overrides[get_db] = lambda: None
     try:
@@ -84,18 +109,64 @@ def test_a_bare_coordinate_yields_a_complete_prediction(client):
     assert body["recommended_action"].strip()
 
 
-def test_the_learned_model_actually_contributed(client):
+def test_a_vegetation_hazard_term_actually_contributed(client):
     """Guards the silent-degradation path.
 
-    `pipeline` runs the model only when a Sentinel-2 scene is available, and slices the feature row
-    by the artifact's own `feature_columns`. If the builder and the artifact ever disagree the
-    service does not crash — it quietly returns a physics-only assessment, which is a far worse
-    failure than an exception because the numbers still look plausible.
+    `pipeline` computes a vegetation term only when a Sentinel-2 scene is available. On the model
+    path it also slices the feature row by the artifact's own `feature_columns`. Either way, if the
+    term goes missing the service does not crash — it quietly returns a physics-only assessment,
+    which is a far worse failure than an exception because the numbers still look plausible.
+
+    Asserted against whichever source is configured, so the guard survives flipping the flag rather
+    than having to be rewritten each time.
     """
+    from argotech.config import settings
+    from argotech.serving.pipeline import PERSISTENCE_VERSION
+
     body = _predict(client)
     assert body["inference"]["model_contributed"] is True
-    assert body["model_version"].startswith("agro-")
-    assert body["risk_assessment"]["hazard"]["vegetation"] > 0.0
+
+    expected = "agro-" if settings.VEGETATION_HAZARD_SOURCE == "model" else PERSISTENCE_VERSION
+    assert body["model_version"].startswith(expected), (
+        f"{settings.VEGETATION_HAZARD_SOURCE} path must stamp its own version, "
+        f"got {body['model_version']!r}")
+
+
+class _FixedZ:
+    """An artifact stand-in that predicts one forward_z, whatever the row."""
+
+    def __init__(self, z: float):
+        self.z = z
+
+    def predict(self, X):
+        return [self.z] * len(X)
+
+
+def _vegetation_hazard_for(client, monkeypatch, z: float) -> float:
+    from argotech.config import settings
+    from argotech.serving.container import model_manager
+
+    monkeypatch.setattr(settings, "VEGETATION_HAZARD_SOURCE", "model")
+    _, columns, version, bounds, stats, peer_ref = model_manager.agronomic_model()
+    monkeypatch.setattr(model_manager, "_agronomic",
+                        (_FixedZ(z), columns, version, bounds, stats, peer_ref))
+    return _predict(client)["risk_assessment"]["hazard"]["vegetation"]
+
+
+def test_the_model_path_moves_the_vegetation_hazard_the_right_way_and_far_enough(client, monkeypatch):
+    """Direction *and* magnitude, through the real serving branch.
+
+    The assertion this replaces was `vegetation > 0.0`, which passes at 0.119 — the value the hazard
+    map returns for z = 0, i.e. exactly the "silent near-zero for every field" symptom it was meant
+    to catch. Only the artifact's `predict` is substituted; cluster assignment, the `_cz` twins, the
+    logistic hazard map and the noisy-OR composition all run for real.
+    """
+    stressed = _vegetation_hazard_for(client, monkeypatch, -2.0)
+    assert stressed > 0.5, f"a field predicted 2 sd behind its peers must carry real hazard, got {stressed}"
+
+    healthy = _vegetation_hazard_for(client, monkeypatch, 2.0)
+    assert healthy < 0.05, f"a field predicted 2 sd ahead of its peers must carry almost none, got {healthy}"
+    assert stressed > healthy
 
 
 def test_the_risk_composition_arithmetic_holds_end_to_end(client):
@@ -174,6 +245,100 @@ def test_a_second_identical_request_returns_the_same_answer(client):
     for key in ("prediction", "risk_score_percent", "priority_label"):
         assert first[key] == second[key]
     assert first["risk_assessment"]["hazard"] == second["risk_assessment"]["hazard"]
+
+
+def test_every_feature_the_artifact_declares_is_actually_fed(monkeypatch):
+    """Serving must supply every column the artifact was trained on.
+
+    `artifact_path` already refuses the production path to a feature set serving cannot build *in
+    principle*. This is the other half: that something actually builds them at request time. The gap
+    between those two is invisible — a feature serving silently stops feeding arrives at the model as
+    NaN, the tree routes it down a branch it never learned, and the prediction still looks entirely
+    plausible. That is how `rvi`, `vh_vv_ratio` and `rvi_z_peer` reached production unfed.
+    """
+    import math
+
+    from argotech.features.agronomic import assign_cluster, cluster_relative_row
+    from argotech.models.registry import ModelManager
+    from argotech.serving.pipeline import gather_upstream
+
+    payload = json.loads((FIXTURES / "meteo_recent.json").read_text())
+    history = json.loads((FIXTURES / "sentinel_history.json").read_text())
+    sar = json.loads((FIXTURES / "sentinel_sar_history.json").read_text())
+
+    monkeypatch.setattr(meteo, "fetch_recent", lambda *a, **k: payload)
+    monkeypatch.setattr(meteo, "climatological_rain_30", lambda *a, **k: 95.0)
+    monkeypatch.setattr(sentinel_client, "fetch_history", lambda *a, **k: history)
+    monkeypatch.setattr(sentinel_client, "fetch_sar_history", lambda *a, **k: sar)
+
+    lat, lon = 10.8, 7.9
+    _, columns, _, bounds, stats, peer_ref = ModelManager().agronomic_model()
+    row, _ = asyncio.run(gather_upstream(lat, lon, "Maize", bounds, peer_ref))
+
+    cluster = assign_cluster(lat, lon, bounds)
+    row = {**row, **cluster_relative_row(row, stats.get(cluster))}
+
+    missing = [c for c in columns if c not in row]
+    unfed = [c for c in columns if isinstance(row.get(c), float) and math.isnan(row[c])]
+    assert not missing, f"artifact expects columns serving never builds: {missing}"
+    assert not unfed, f"artifact columns fed NaN on a fully successful build: {unfed}"
+
+
+def test_a_field_outside_every_trained_cluster_says_so_on_the_wire(client):
+    """Out-of-cluster is an extrapolation, and the response has to admit it.
+
+    The artifact carries per-cluster standardisation constants, so a field outside all six gets NaN
+    for all 17 `_cz` twins and for the peer anomaly — the model runs on roughly half its inputs and
+    persistence returns no vegetation hazard at all. Every other number looks entirely ordinary,
+    which is why `cluster: null` has to be visible rather than inferred.
+
+    Bayelsa, in the Niger Delta: coastal rainforest, and the training set is Sahel, savannah and
+    East African highlands. These are the coordinates of a real registered farm.
+    """
+    inside = client.post("/predict/coldstart", json={
+        "latitude": 10.8, "longitude": 7.9, "crop_type": "Maize", "farm_size": 2.0}).json()
+    outside = client.post("/predict/coldstart", json={
+        "latitude": 4.9372, "longitude": 6.3372, "crop_type": "Maize", "farm_size": 2.0}).json()
+
+    assert inside["inference"]["cluster"] == "Kaduna_Grain_Belt"
+    assert outside["inference"]["cluster"] is None, (
+        "a field outside every trained cluster must report it, not look like any other prediction")
+
+
+def test_a_legacy_client_sending_model_name_still_works(client):
+    """`model_name`/`model_alias` were removed from the schemas. Pydantic ignores unknown fields, so
+    the Kotlin client can keep sending them until it is updated — pinned here because the removal is
+    only safe as long as that stays true."""
+    resp = client.post("/predict/coldstart", json={
+        "latitude": 10.8, "longitude": 7.9, "crop_type": "Maize", "farm_size": 2.0,
+        "model_name": "farmerXential_powerful_model", "model_alias": "prod",
+    })
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["model_version"] != "none"
+
+
+def test_out_of_range_coordinates_are_rejected_on_both_paths(client):
+    """The coldstart schema bounds its own body. The farmer path takes its coordinates from
+    farmer_profiles, where nothing has checked them, so the pipeline guard is what covers it —
+    otherwise a bad stored latitude reaches Open-Meteo and CDSE as a 400 each and the request
+    quietly degrades into a prediction built from missing upstreams."""
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from argotech.serving.pipeline import PredictionsService
+
+    resp = client.post("/predict/coldstart", json={"latitude": 999.0, "longitude": 7.9})
+    assert resp.status_code == 422, resp.text
+    resp = client.post("/predict/coldstart", json={"latitude": 10.8, "longitude": -200.0})
+    assert resp.status_code == 422, resp.text
+
+    service = PredictionsService(model_manager=None,
+                                 data=SimpleNamespace(farmer_id="f1"), db=None)
+    farmer = SimpleNamespace(latitude=999.0, longitude=7.9, farm_size=1.0, crops=["Maize"])
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(service.predict_from_farmer_data(farmer))
+    assert excinfo.value.status_code == 422
 
 
 def test_crop_health_endpoint_serves_the_index(client):

@@ -412,7 +412,7 @@ argotech-ai/
 │   ├── features/               # feature schema + point-in-time builders
 │   ├── models/                 # estimators, fusion, registry/loading
 │   ├── serving/                # FastAPI app, routers, request/response schemas, pipeline
-│   └── training/               # dataset construction, training entrypoints
+│   └── lab/                    # panel construction, honest evaluation (run.py), artifact export
 └── tests/test_domain.py        # runnable self-check for the whole domain layer
 ```
 
@@ -459,6 +459,14 @@ boundaries so peer cohorts become spatial rather than temporal. Drift monitoring
 ---
 
 ## 9. Retraining results
+
+> **Superseded in part.** This section and §9.1 evaluate the `forward_z`/`ndvi_z_peer` pipeline under
+> `argotech.training`, which no longer exists — it was retired in favour of `argotech.lab` (§11).
+> That retirement also fixed a peer-reference leak these sections' numbers do not reflect: the
+> constants behind `ndvi_z_peer` here were fitted over the whole frame, held-out clusters included.
+> §9.2 reports the corrected, fold-fitted results and the multiple-comparisons finding that governs
+> how to read every spatial number in this document, including the ones below. Read this section as
+> the historical record of what was believed at the time, not as the current evidence.
 
 The model was rebuilt on real data (`argotech.training.dataset` → `argotech.training.train`) and
 evaluated under the protocol in §6.
@@ -540,6 +548,13 @@ persistence on temporal generalisation, which it does not yet do.
 
 ## 9.1 Cross-region robustness experiments
 
+> **Superseded in part.** Like §9, these experiments ran on `argotech.training`'s whole-frame-fitted
+> peer reference, since retired. §9.2 supersedes the spatial-skill picture below with a fold-fitted
+> comparison and the multiple-comparisons argument the field-relative results here did not have
+> available. **C**'s linear-vs-boosted finding also does not survive the reformulated target — see
+> the superseding note at the head of **C** itself and §9.2. The Presto results (**F**, **G**) are a
+> separate architecture comparison, not leak-dependent, and are not contradicted by §9.2.
+
 Three changes, run against the same 7,527-sample dataset with no rebuild, prompted by a review of
 recent cross-region agricultural ML. Full output: `artifacts/experimental/`.
 
@@ -582,6 +597,19 @@ these are the two metrics worth having. Six cluster-relative twins now appear in
 permutation importances, so the transform is carrying signal rather than adding noise.
 
 ### C. The linear arm wins out-of-cluster
+
+> **Superseded in part.** The comparison below was measured on the `level` target under the
+> whole-frame-fitted (leaky) peer reference, both since corrected — see §9.2 and
+> `experiments/E05-robust-loss/` (commit `7ec0ed7`). Under the reformulated target the reversal does
+> not hold: `linear`'s temporal net benefit is significantly *harmful* — `level_z`/`geo_month`
+> **-0.0197 [-0.0264, -0.0066]**, `within_xy`/`geo_month` **-0.0145 [-0.0173, -0.0129]**,
+> `within_xy`/`leaky` **-0.0189 [-0.0202, -0.0181]** — every interval entirely below zero, i.e.
+> reliably worse than predicting nothing. The inference drawn below, "the constraint is distribution
+> shift, not model capacity," was drawn from a comparison that no longer holds and should not be
+> carried into a write-up unexamined. Note what this does **not** establish: the reversal shows the
+> earlier inference was not robust to the target and reference used, not that the constraint *is*
+> capacity — nothing in E05 tested that question. The text below is retained as the record of what
+> was believed at the time.
 
 A multinomial logistic head over identical features, added as a ceiling check on the strength of
 arXiv 2605.08113's finding that simpler models transfer better under shift. It does not merely match
@@ -790,6 +818,455 @@ That choice belongs to whoever owns the latency budget.
 
 ---
 
+## 9.2 The lab redesign: a fold-fitted peer reference, and what survives multiple comparisons
+
+`argotech.training` is retired (§11); `argotech.lab` replaces it and fixed three leaks the results in
+§9 and §9.1 do not reflect. Full citation trail: `docs/FACTS.md` §7. Concepts and formulas, with
+their warrants: `docs/CONCEPTS.md` Part 4. In order: `alpha_hat`'s own guard test was blind to a
+same-row leak; the temporal split cut training on the prediction date instead of the label date
+(§9/§9.1's forward-chaining folds inherited this, and a later commit re-shipped the same defect under
+a message claiming to fix it — it is corrected now, in `argotech.lab.eval.splits.forward_chaining`); and
+the peer reference behind `ndvi_z_peer`, which both the label variants and the persistence baseline
+depend on, was fitted over the whole frame — 42 of 45 `cluster|MM` buckets span multiple years, and
+under leave-one-cluster-out a held-out cluster's own bucket was fit from itself.
+
+`argotech.lab.estimand.peers` now fits three keys per fold: `leaky` (the old whole-frame column, kept as a
+control), `cluster_month`, and `geo_month` (fixed latitude/elevation bands, never quantiles fit over
+the frame). The consequence is itself a finding: an honest `cluster_month` fit gives a held-out
+cluster **no reference at all** — coverage `[0.0, 0.0, 0.0, 0.0]`. `geo_month` restores coverage to
+`[1.0, 1.0, 1.0, 0.472]`, the shortfall being Kenya, the panel's one highland cluster, which borrows a
+reference only below the 1000 m elevation band.
+
+### The negative result
+
+Under the corrected, fold-fitted protocol, `level_z` — the only target that supports comparing across
+peer keys, since `within_y`/`within_xy`/`delta_z` are defined *through* `ndvi_z_peer` — clears a 95%
+interval excluding zero at **every temporal key** (`leaky` +0.0194, `cluster_month` +0.0179,
+`geo_month` +0.0172) and at **no spatial key that could be evaluated** (`leaky` +0.0064
+[-0.0014, +0.0142]; `geo_month` +0.0066 [-0.0020, +0.0157]; `cluster_month` could not be evaluated —
+every fold skipped, no reference exists). The single largest cell anywhere in the 12-cell matrix,
+spatial / `geo_month` / `within_xy` / `linear` at +0.0404, has a 95% CI of [-0.0072, +0.0940] on the
+fold-level bootstrap and [-0.0026, +0.0781] on a 200-replicate site-level bootstrap — **both cross
+zero** — and its per-fold decomposition is two of four folds negative (Benue +0.1268, Kaduna -0.0103,
+Kano -0.0042, Kenya +0.0491), with the mean carried by Benue at roughly 3× the reported effect. A
+24-cell sweep over `geo_month` band widths found no band at which spatial net benefit separates from
+zero.
+
+**Read plainly: the strongest spatial result this repository has produced does not survive its own
+confidence interval, and neither does any configuration measured near it.** Temporal skill, by
+contrast, is established — every temporal cell tested clears zero.
+
+### The mechanism: temporal skill is the field effect, and removing it removes the skill
+
+`experiments/E05-robust-loss/` (commit `7ec0ed7`) isolates why. Compare the temporal column across
+the two targets, `leaky`/`geo_month` as available: `level_z`, which **retains** the field effect,
+clears zero for both a learned arm and the field-mean baseline — `boosted` **+0.0194
+[+0.0182, +0.0216]**, `climatology` **+0.0086 [+0.0044, +0.0116]**. `within_xy`, which **removes** it
+by demeaning both target and features per FWL (`docs/CONCEPTS.md` Part 4), does not: `boosted`
+**-0.0011 [-0.0051, +0.0031]**, `linear` **-0.0145 [-0.0173, -0.0129]**, `persistence` **-0.0468
+[-0.0693, -0.0234]** — every learned arm at or below zero, several significantly below.
+
+Remove the field effect and the temporal skill goes with it. §7.1's decomposition
+(`experiments/E01_variance_decomposition.out`) measured that effect at 34.5% of variance directly;
+this reaches the same conclusion from the opposite direction, and licenses a stronger statement:
+**at this resolution the field effect is essentially all of the predictable signal.** That is why
+climatology was hard to beat in §9, why the incumbent behaved like a smoothed persistence model, and
+why the reformulated target has nothing left to predict.
+
+The same experiment tested whether robust losses recover anything from the heavy tails documented in
+`docs/CONCEPTS.md` Part 4 (`linear_huber`, `boosted_abs`, run alongside the existing arms rather than
+replacing them). They do not: equal or worse everywhere, clearly worse where signal exists —
+`level_z`/`leaky` temporal `boosted` +0.0194 against `boosted_abs` +0.0126 [+0.0101, +0.0144].
+`linear_huber` reaches **+0.0451 [-0.0011, +0.0964]** on `within_xy`/`geo_month` spatial — the
+closest anything in this repository has come to clearing zero there — and it still crosses. The tails
+are real but were not hurting the fit; down-weighting them costs signal rather than recovering any.
+Not adopted.
+
+### The multiple-comparisons argument
+
+165 spatial cells were tested across the leave-one-cluster-out grid and the band sweep; 8 cleared a
+95% interval excluding zero, against ~4.1 expected by chance with no correction — a ratio of **1.9×**.
+65 temporal cells were tested; 13 cleared zero against ~1.6 expected — **8.0×**. No formal correction
+(Bonferroni, Benjamini–Hochberg) has been applied to either figure; the raw ratio is reported instead
+of one, and a pre-registered comparison would be the proper fix. This is the argument that governs how
+to read every spatial number in §9, §9.1 and this section: temporal skill clears its bar by a wide
+margin; spatial skill does not clear its bar by more than chance would predict at four independent
+spatial units.
+
+This is **not** an argument that the 8 significant spatial cells are fictitious — they exist, and an
+earlier internal claim that "no configuration shows out-of-region skill" was wrong and is corrected
+here. It is an argument that 8 of 165, at this ratio, is not distinguishable from noise — reinforced
+by the hits being internally incoherent: `level_z` / `geo_month` / `boosted` clears zero at a 500 m
+elevation band and at 2000 m but not at the 1000 m band between them, which is not the shape a real
+effect produces.
+
+### One further caveat that applies to every number above
+
+The panel these results were computed on (`content_hash 6c832dc2…`) contains 233 rows (5.07%) with
+physically invalid NDVI (NDVI < 0 — water, cloud, shadow or snow, never vegetation), which drives
+`forward_z`'s extreme tail: rows with `|z| > 3` are 8× enriched for a negative label-date NDVI. The
+fix (`MIN_VALID_NDVI = 0.0`, `MIN_COHORT_SD = 0.005`) landed in `argotech.lab.panel.panel`, but the panel
+was **deliberately not rebuilt**: the meteo cache is keyed on `date.today()` and the committed panel
+spans at least five distinct fetch windows, so a rebuild today would both invalidate 38 committed
+result files pinned to the current `content_hash` and confound the NDVI fix with a change in weather
+data. Every number in this section, without exception, was computed on the panel as committed,
+invalid observations included.
+
+---
+
+## 9.3 The drought term saturates for 60% of the panel, and a ranking cannot see past it
+
+> **SUPERSEDED by 9.3a -- the defect described here has been fixed.** All four hazard components
+> are now logistics; combined hazard is exactly 1.0 for 0.0000% of the panel. This section is kept
+> unchanged because it is the measurement and the argument that justified the change -- and because
+> 9.3a's central finding is that fixing it did **not** change the triage queue.
+
+Computed with the real `domain.risk.assess_hazard` over all 4,596 panel rows, with `cumulative_dsv=0`
+and `vegetation=0` because neither is retained in the panel (production derives DSV from a raw hourly
+series that is never stored; see §9's "not available in the panel" note on the same columns).
+Reproduced in `notebooks/05-risk-composition.ipynb`, §2.
+
+```
+combined hazard:  mean 0.686   median 1.000
+  share exactly 1.0                     : 59.6%
+  rows with water_satisfaction_30 <= 0.35: 58.7%
+  distinct hazard values in the top half : 1
+```
+
+**The hazard term cannot rank 60% of the panel.** Those rows all sit at exactly 1.0 — one value, no
+ordering.
+
+The mechanism, from `argotech/domain/risk.py:129-130`:
+
+```python
+drought = _clamp01((1.0 - water_satisfaction - 0.15) / 0.5)    # saturates at ws <= 0.35
+drought = max(drought, _clamp01((dry_spell_days - 7) / 14.0))  # or dry_spell >= 21
+```
+
+Two independent saturating paths, and `noisy_or` then pins the combined value at 1 — once any input
+to a noisy-OR is 1.0, the product `Π(1 − hᵢ)` is 0 regardless of the other terms, so no other
+component can pull the combined hazard back down.
+
+**This measurement is conservative.** Because DSV and vegetation are set to 0, the real production
+hazard saturates *more*, not less — noisy-OR is monotonic in its inputs (§4.5), so adding terms can
+only raise the combined value, never lower it.
+
+Measured rather than only argued: rerunning the same calculation with the notebook's real
+persistence-based vegetation term in place of 0 gives mean 0.749 and 59.68% saturated — the
+saturation share moves by 0.08 points. The pinning is driven by drought alone, and restoring the
+other hazard inputs does not relieve it.
+
+**The consequence.** `loss_rate = hazard × (0.5 + 0.5·v) × MAX_LOSS_FRACTION`, and the triage queue
+ranks by `expected_loss = exposure × loss_rate` (§4.5). Where hazard is pinned at 1.0, the ordering is
+driven entirely by **exposure** — `area × expected_yield × price` — which has no validation data
+anywhere in this repository (the panel has zero farmer/household columns). Notebook 05's own
+sensitivity analysis (§4 there) already quantifies this: `expected_loss` swings ~$3,531 across a
+plausible exposure range against $450 for the full observed hazard range and $225 for vulnerability.
+So for the majority of fields, **the queue's order is not determined by agronomic risk** — it is
+determined by farm size. Vulnerability also acquires an unintended role in the saturated rows: when
+hazard is pinned, the `(0.5 + 0.5·v)` modulation becomes the only thing still varying inside
+`loss_rate`.
+
+**This is a known failure mode in this codebase, not a new one.** `risk.py:41-42` already documents
+the same mechanism on the vegetation term — a hard ramp that assigned exactly 0.0 to 68% of fields
+and cost 23% of rank correlation under leave-one-cluster-out (rho 0.351 → 0.271) — and the fix there
+was a smooth, strictly-monotone mapping (`vegetation_hazard_from_anomaly`) instead of a threshold.
+Drought now shows a 59.6% tie rate by the same construction (a hard ramp against a fixed cut point)
+and has not had the same treatment.
+
+This section does not decide between a smooth mapping and a different threshold for drought — both
+are candidates by the vegetation precedent, and choosing between them is a product decision about
+what a hazard of 1.0 should mean (does drought stop getting worse at `water_satisfaction_30 = 0.35`,
+or does it keep ranking past that point?), not a modelling one.
+
+### 9.3a Resolved — the smooth mapping was adopted, and it did not change the queue
+
+The choice above was made: **all four hazard components are now logistics** (`domain/risk.py`,
+`_soft_ramp`), matching what `vegetation_hazard_from_anomaly` always did. Every published threshold is
+unchanged; the map returns `RAMP_LO = 0.02` where the old ramp read 0 and `RAMP_HI = 0.90` where it
+read 1, asymptotic at both ends. `_no_saturate` runs last, after rounding, because the absorbing
+state is a property of the stored value: `noisy_or` of four components each capped at `1 − 1e-9`
+is `1 − 1e-36`, which is exactly 1.0 in float64. `combined` is stored at 6dp, since at 3dp rounding
+alone collapsed 140 distinct top-half values back to 8.
+
+| on the committed panel | before | after |
+| --- | --- | --- |
+| combined hazard exactly 1.0 | 59.6% | **0.0000%** |
+| combined hazard exactly 0.0 | 22.1% | **0.0000%** |
+| distinct values in the top half | **1** | **137** |
+| severe drought, then adding severe disease | absorbed, no change | +0.0015 |
+
+Full suite: **201 passed, 1 skipped**. Two test expectations were changed, both deliberately, and
+both are behaviour changes worth knowing about:
+
+* A calm field no longer scores exactly 0. `assess_risk` on a calm field with $1,500 at risk now
+  returns **$20.02** expected loss rather than $0.00 (1.3%, severity still `NORMAL`). Strictly
+  monotone maps have no exact zeros — and that is the point, since exact zeros tied 22% of the panel
+  at the bottom of the queue where nothing could order them.
+* At the published spray threshold `disease` reads `RAMP_HI = 0.90`, not 1.0.
+
+A latent bug surfaced while testing this: `vegetation_hazard_from_anomaly` raised `OverflowError` on
+an extreme peer anomaly, because `1/(1 + exp(x))` overflows for `x > 709` in float64. A degenerate
+cohort standard deviation can produce such a z. It now routes through a sign-split `_logistic`.
+
+**What this did NOT fix, which matters more than what it did.** Removing the ties restored hazard's
+*ability* to order the queue and did not change the order:
+
+| same 3,578 rows | hazard share of var(log expected_loss) | exposure share |
+| --- | --- | --- |
+| clamped ramps | 26.3% | 70.7% |
+| smooth ramps | 34.2% | 63.1% |
+
+Reconstructing the top 100 from one term gives 48/100 by exposure and **2/100** by hazard (was 49 and
+4). The reason is dynamic range, not ties: across the panel's top half, hazard now spans
+0.992824–1.000000, a ratio of **1.007×**, while exposure spans 45–10,249 USD, a ratio of **227×**.
+Hazard is structurally bounded to [0,1]; `exposure = area × yield × price` is three unbounded numbers
+multiplied together. A bounded term cannot out-rank an unbounded one however well shaped it is, so
+the queue's ordering problem is exposure, and it is not addressable by any hazard map.
+
+*(One measurement trap, recorded because it initially misled this analysis: the pre-fix decomposition
+silently dropped the 1,018 rows whose hazard was exactly 0, since `log 0` is undefined. Under the
+smooth map those rows return with large negative logs and inflate hazard's apparent share to 64.6%.
+The table above restricts both arms to the same 3,578 rows.)*
+
+**Unaffected by this change, verified rather than assumed:** `assess_hazard` and `assess_risk` are
+called only from `serving/pipeline.py`. `lab/` never imports `domain.risk`, and `forward_z` is
+computed in `lab/panel/panel.py` independently. **E01, E02, E05 and E06 therefore cannot move** — they
+measure the panel and the label, not the risk composition. Re-running them would reproduce identical
+numbers.
+
+### 9.4 The ranking deprioritises the most vulnerable households — measured, not hypothesised
+
+**Status: open. This is an equity defect in the composed ranking, not a bug in any single function.**
+
+Until E07 there was no data for exposure or vulnerability, so every analysis here — including §9.3a's
+variance decomposition — sampled them **independently**. With both terms built from Nigeria GHS-Panel
+Wave 5 for the same 3,011 households (`experiments/E07-lsms/`), that assumption is testable, and it
+is false:
+
+| | spearman |
+| --- | --- |
+| exposure ~ vulnerability | **−0.410** |
+| farm size ~ vulnerability | −0.378 |
+| yield ~ vulnerability | +0.076 |
+
+Poorer, less-equipped households farm smaller plots. Composed through the real `assess_risk`:
+
+```
+spearman(expected_loss, vulnerability)  = -0.289
+vulnerability, top-200 by expected_loss :  0.766
+vulnerability, everyone else            :  0.799
+```
+
+**A queue ranked by `expected_loss` puts less-vulnerable farmers first.** By arithmetic, not intent:
+`expected_loss = exposure × loss_rate`, and least coping capacity co-occurs with least value at risk.
+
+**Why the existing design does not prevent it.** `(0.5 + 0.5·v)` was chosen so vulnerability *raises*
+the loss rate rather than zeroing it (§4.5, and `CONCEPTS.md` "Vulnerability as a modulation"). But
+that modulation is bounded to a factor of two, while exposure varies **7.7× across the interquartile
+range** of real smallholder farms. The correction is overwhelmed by exposure's spread and then pushed
+the wrong way by the negative correlation between the two terms. Both design choices are individually
+defensible; the interaction is what fails.
+
+**Relation to the fairness guard already in place.** `PROTECTED_ATTRIBUTES` makes
+`assess_vulnerability` raise if a protected characteristic is used as an input, so protected
+attributes cannot *drive* vulnerability. Nothing checks whether the **composed ranking** disadvantages
+poor households through farm size — and it does. The guard covers the input surface, not the outcome.
+
+**Not decided here**, because it is a product and ethical decision, not a modelling one:
+
+* rank by `risk_score` (a loss *rate*, exposure-free) rather than `expected_loss`;
+* cap or log-compress exposure so it cannot dominate;
+* stratify the queue so a share of visits is reserved by vulnerability;
+* or accept expected-loss ranking explicitly, on the stated basis that it maximises value protected
+  per visit — which is a coherent position, but should be a decision on record rather than a
+  by-product of the formula.
+
+**What is measured and what is composed.** The −0.410 correlation is measured from survey data alone
+and depends on no hazard. The expected-loss magnitudes and the severity mix (1,886 of 3,011 CRITICAL)
+are composed: these households have no coordinates, so hazard was drawn from the panel's own
+distribution. The 63% CRITICAL rate suggests the severity thresholds are miscalibrated for this
+population, but that rests on a drawn hazard and is not claimed. **Population caveat:** GHS-Panel is a
+national survey sample, not this product's registered farmers — see
+`experiments/E07-lsms/FINDINGS.md` for the falsification test to run once real users exist.
+
+---
+
+**Deliberately not changed:** the two clamped ramps in `domain/indices.py`. `vci`'s [0,100] clamp is
+definitional to Kogan (1990) and changing it would break the citation, and `moisture` feeds
+`CropHealth`, a weighted **mean** — which has no absorbing state. The rule follows from noisy-OR's
+algebra and does not generalise to every clamp in the codebase.
+
+---
+
+## 9.5 The composition, scored against a realised outcome — and it loses to its own exposure term
+
+**This is the first time the composed score has been compared to anything that happened.** §9.3a
+fixed hazard's saturation, §9.4 measured the equity consequence of the ranking, and both reasoned
+about the *terms*. Neither scored `Risk = Hazard × Exposure × Vulnerability` **as a whole** against
+an outcome, because no outcome existed. E10 produced one, on the same survey households E07 composed
+risk for, and the two join on `hhid`. Experiment: `experiments/E11-composed-validation/`; notebook:
+`notebooks/10-does-the-risk-equation-work.ipynb`.
+
+2,875 households, 355 EAs, prevalence of `any_loss` 0.2894. Unit is the **household**, because a
+visit goes to a farmer; intervals resample **EAs**, never households.
+
+**What it can and cannot settle.** E07's `hazard` is *drawn* — Wave 5 ships no coordinates. So this
+scores the **exposure × vulnerability** composition, which is 77.4% of `var(log expected_loss)` and
+the part under dispute. It cannot validate the hazard model; nothing in this repository can until
+outcome capture runs. The drawn hazard also supplies a **negative control**, and it passes: hazard
+alone scores AUC **0.496 [0.473, 0.519]**, spanning chance. The harness is sound.
+
+| ranking | AUC | 95% CI (EA) | PR-AUC | P@50 | vuln@50 |
+| --- | --- | --- | --- | --- | --- |
+| `expected_loss` (production queue) | **0.537** | [0.505, 0.567] | 0.316 | 0.300 | 0.728 |
+| `risk_score` | 0.466 | [0.443, 0.489] | 0.268 | tied | 0.954 |
+| `expected_loss`, log-compressed exposure | 0.512 | [0.487, 0.538] | 0.301 | 0.320 | 0.818 |
+| `exposure` alone | 0.564 | [0.526, 0.597] | 0.334 | 0.360 | 0.721 |
+| `hazard` alone — negative control | 0.496 | [0.473, 0.519] | 0.289 | tied | 0.818 |
+| E10 fitted model — ceiling | **0.652** | [0.621, 0.683] | 0.429 | 0.560 | 0.665 |
+
+Base rate 0.289; population mean vulnerability 0.780.
+
+### Composing costs ordering information
+
+Paired EA bootstrap — both arms scored on the same resample, so the shared between-EA variance
+cancels. Comparing the independent intervals above would not answer this question.
+
+| contrast | ΔAUC | 95% CI | P(Δ>0) |
+| --- | --- | --- | --- |
+| `expected_loss` − `exposure` alone | **−0.0269** | [−0.0438, −0.0100] | 0.001 |
+| `expected_loss` − `hazard` (control) | +0.0403 | [+0.0137, +0.0653] | 0.999 |
+| `risk_score` − `expected_loss` | −0.0704 | [−0.1048, −0.0349] | 0.000 |
+| E10 ceiling − `expected_loss` | **+0.1149** | [+0.0840, +0.1442] | 1.000 |
+
+`expected_loss` ranks **below `exposure` alone**, and the interval excludes zero. §9.3a and
+`CONCEPTS.md` Rule 3 established that the composite is exposure-*dominated*; measured against an
+outcome it is exposure *degraded*. Multiplying by a drawn hazard and a real vulnerability removes
+ordering information rather than adding any.
+
+**The confound, checked rather than assumed.** `any_loss` rises mechanically with plot count, and
+exposure correlates with plot count (spearman +0.228), so exposure's edge could be counting plots.
+Most of it is: plot count alone gives AUC 0.553 against exposure's 0.564. A residual survives —
+within fixed plot-count strata exposure holds 0.521 / 0.534 / 0.549 at 1 / 2 / 3 plots, and on the
+count-free `share_loss` rate it keeps **+0.117** spearman against `expected_loss`'s +0.069. Larger
+farms do lose crop slightly more often, so exposure is not purely a magnitude term. +0.117 is not a
+mandate to own 77% of the ranking.
+
+**Decision curve** (net benefit, ceiling = event rate 0.2894). At `t ≤ 0.20` every composed arm is
+*identical to visiting everyone* — the scaled probabilities put the whole population above the
+threshold. At `t = 0.30` `expected_loss` clears "visit nobody" by 0.0093. Only the fitted model
+clears both trivial strategies across the range (0.0588 at t = 0.30, 0.0212 at 0.40).
+
+### The robustness result, which is independent of everything above
+
+For a triage queue, the order moving matters more than any figure being wrong. Perturbing only by
+error this repository has already measured — per-crop yield against FAO, and plot area at its
+recorded rank agreement of spearman +0.549 (n=5,137):
+
+| scenario | top-50 retained | top-100 | top-200 | ρ vs base |
+| --- | --- | --- | --- | --- |
+| A — yields corrected to FAO by crop mix | 0.84 | 0.76 | 0.855 | 0.976 |
+| B — plot-area measurement error | **0.10** | 0.15 | 0.25 | 0.657 |
+| C — both | 0.16 | 0.21 | 0.30 | 0.629 |
+
+The systematic yield bias is benign. The **random** area error destroys the order: one in ten of the
+top 50 survives. **Ranking farmers 1..50 asserts a precision the inputs cannot support.** Either
+improve area measurement, or serve an unordered top-k. This conclusion does not depend on the drawn
+hazard, on the confound above, or on which term dominates.
+
+### 9.5a Two defects found and fixed here
+
+**`risk_score` could not order a 50-farmer queue.** It was `round(score, 1)`, leaving **566 distinct
+values across 3,011 households** with the 50th and 51st farmer tied — so the top 50 of an
+exposure-free queue was an artifact of DataFrame row order. §9.3a learned exactly this on
+`Hazard.combined` (3dp collapsed 140 top-half values to 8, hence 6dp) and the lesson was never
+applied to the field a queue actually sorts on, because only `combined` was audited. Now
+`round(exact, 4)` — 2,089 distinct, untied; 6dp adds seven values and nothing else. Display
+precision is a presentation choice and belongs to whatever renders it.
+
+**Severity was decided by that rounding.** The bands read the rounded `risk_score`, so a field at
+64.96 rounded to 65.0 and banded CRITICAL while 64.94 banded ELEVATED. They now read the exact
+value. On E07's households the two agree on all 3,011 rows, so no observed outcome changes; a
+coupling that could flip a band for no explicable reason is gone.
+
+Both are covered by tests that were **verified to fail against the pre-fix code** —
+`test_risk_score_can_order_a_queue_without_ties` and
+`test_severity_is_decided_by_the_exact_score_not_the_rounded_one`. The first needed two attempts:
+its initial version separated fields by 0.23 score points, which 1dp resolves, so it passed against
+the defect it existed to catch. It now asserts the fields span under a tenth of a point *before*
+asserting distinctness. This is the failure the joining spec §7 names — "a test that passes against
+broken code is worse than no test — four did so earlier in this project."
+
+### 9.5b The severity bands cannot be fixed by moving them
+
+E07's 63% CRITICAL rate looked like miscalibrated thresholds. Measured on the committed panel
+(4,596 rows, **real** hazard, vulnerability held at E07's median 0.798), the problem is worse and
+different: `risk_score` is **bimodal**.
+
+```
+percentiles:  p10 3.9   p25 7.6   p50 89.2   p75 89.8   p90 89.8
+bands:        CRITICAL 63.3%   NORMAL 28.8%   ELEVATED 4.2%   WATCH 3.7%
+```
+
+E07's independent households reproduce it (62.6 / 29.8 / 4.0 / 3.6). The cuts 65 / 35 / 15 sit at
+the 28.8th, 32.5th and 36.7th percentiles — **three of the four bands are decided inside a region
+holding about 8% of fields**, and the middle of the range is empty.
+
+The cause is upstream of the numbers. `_soft_ramp` is a logistic: a field past a component's severe
+threshold asymptotes toward `RAMP_HI`, one below the no-hazard threshold toward `RAMP_LO`. §9.3a
+fixed the *ties* and never claimed to change the *shape*. So no absolute cut can discriminate here —
+moving them relabels the same near-binary split.
+
+The fix is to band by **capacity**: quantiles of the population actually served, so CRITICAL means
+"the k fields an officer can reach this week" rather than an absolute score. That needs the served
+distribution, which `predictions` already records on every row — a query once there is traffic, not
+a modelling problem. The thresholds are now `SEVERITY_BANDS` in `domain/risk.py` with this
+measurement recorded beside them, so recalibration is one place rather than four literals in a
+branch. **No new numbers were invented**: there is no distribution in this repository with real
+hazard *and* real vulnerability to calibrate against.
+
+### 9.5c The ranking target — the decision §9.4 left open, now priced
+
+§9.4 declined to choose between ranking keys on the grounds that it is a product and ethical
+decision rather than a modelling one. That remains true. What was missing was the cost of each
+option, and E11 supplies it:
+
+| queue key | AUC vs realised loss | mean vulnerability of top 50 | what it optimises |
+| --- | --- | --- | --- |
+| `expected_loss` | 0.537 | 0.728 (**below** the 0.780 population mean) | value protected per visit |
+| `expected_loss`, log-compressed exposure | 0.512 | 0.818 | a middle position |
+| `risk_score` (exposure-free) | 0.466 (**below chance**) | 0.954 | reaching the least able to cope |
+
+Read plainly: `expected_loss` finds slightly more real loss and prioritises the *less* vulnerable.
+`risk_score` reverses the equity inversion completely and **ranks worse than chance** against
+realised loss — equity bought at the price of finding anyone. Log-compressed exposure costs 0.025
+AUC and buys +0.09 vulnerability.
+
+**Recommendation, not a decision.** Log-compressed exposure is the defensible default: it keeps
+exposure's genuine (if small, §9.5's confound paragraph) relationship to realised loss while
+removing the 227× dynamic range that lets farm size own the ranking. But given §9.5's robustness
+result — 10% top-50 retention — **the ordering question is currently less important than the claim
+to have an ordering at all.** Serving an unordered top-k makes the choice between these three keys
+much less consequential, and is the cheaper change.
+
+Nothing here is shipped. `RiskAssessment` already returns both fields; which one a queue sorts on is
+the caller's decision, and it should be recorded as one rather than inherited from the formula.
+
+### What E11 does not say
+
+It does not say the risk equation is wrong. Hazard is drawn here; the decomposition remains
+separately defensible; and an extension officer can act on "water deficit 60 mm at flowering,
+dominant hazard drought" without trusting the composed rank at all. The finding is narrower and
+firmer: **as a ranking key, the composed score does not beat its own exposure term, and its order
+does not survive the measurement error this repository has already documented.**
+
+Population caveat unchanged: GHS-Panel is a national survey sample, not this product's registered
+farmers, and E07's falsification test applies to every number above. The label is `sa3iq6` — was
+area harvested less than area planted — a partial-loss indicator, not yield.
+
+---
+
 ## 10. Serving architecture: batch features + audit trail
 
 Two changes that make the rest of the roadmap possible.
@@ -834,14 +1311,61 @@ Persistence never fails a prediction: losing the audit row is bad, refusing the 
 because the audit table is unavailable is worse. If the job has never run and the tables do not
 exist, predictions still serve and the write is logged and skipped.
 
+**A defect found by exercising this path rather than reading it.** `label_join` matches an outcome
+to a prediction two ways: an explicit `prediction_id`, or — for a spontaneous visit or an SMS that
+carries none — any prediction for the same field within the horizon. The second branch **fanned
+out**. `jobs/precompute` writes a prediction per field per *day*, so one unlinked agent report falls
+inside the horizon of every prediction in the preceding 30 and joined to all of them. Measured with
+five daily predictions, a single field visit produced **five** labels.
+
+Both halves of the feedback loop would have been corrupted, and quietly. `GET /outcomes/label-count`
+is the number that decides when phase 3 starts, and it would have read up to 30× high — the loop
+would have looked closed long before it was. And a training set built from this query would carry
+30 near-identical rows for one real fact, which is "39 monthly observations of one site are not 39
+independent facts" arriving in a new place.
+
+Fixed with `DISTINCT ON (o.id)`: one outcome, at most one row. Which prediction an unlinked report
+scores is a real question rather than a tie to break arbitrarily, and the answer is the most recent
+forecast standing when the agent looked — the advisory in force at the time of the visit. An
+explicit `prediction_id` still wins outright, since it matches only the first branch.
+
+Worth stating plainly about how this was found: every pre-existing test wrote **one** prediction per
+field, so none of them could see it. Four tests covered `label_join` — explicit link, unlinked
+inside the horizon, unlinked outside it, and an outcome preceding its prediction — and all four
+passed against the defect. The path had never been exercised in the shape production would actually
+produce.
+
 ---
 
 ## 11. Implemented in this branch
 
-- **Retrained model** — `argotech/training/dataset.py` rebuilt from scratch: real ERA5 + Sentinel-2,
-  90-day feature window, 30-day-ahead peer-standardised label, documented leakage controls.
-  `argotech/training/train.py` implements the §6 protocol (spatially blocked, forward-chaining,
-  baselines, permutation importance on held-out ground, ECE, precision@k). Results in §9.
+- **Retrained model** — `argotech/training/dataset.py` (as it was) rebuilt from scratch: real ERA5 +
+  Sentinel-2, 90-day feature window, 30-day-ahead peer-standardised label, documented leakage
+  controls, evaluated under the §6 protocol (spatially blocked, forward-chaining, baselines,
+  permutation importance on held-out ground, ECE, precision@k). Results in §9. `argotech.training` is
+  now retired — see below.
+- **`argotech.lab` replaces `argotech.training`.** `training/train.py` (684 lines) and its
+  `__init__.py` are deleted; `dataset.py` moved to `argotech/lab/panel/panel.py` and `embed.py` to
+  `argotech/lab/presto/embed.py`, both by `git mv` (history preserved across the pre-move commits).
+  `argotech/lab/arms/export.py` is now the sole producer of `artifacts/agronomic_risk.joblib`, proven
+  end-to-end before `train.py` was deleted: exported to a scratch path, loaded through
+  `argotech/models/registry.py`'s `ModelManager`, passed the contract check, and `model.predict`
+  succeeded on the exact DataFrame shape `serving/pipeline.py` builds. The production artifact itself
+  is unchanged by any of this — an empty diff across the session.
+- **`argotech/lab/estimand/peers.py`** fits the peer reference behind `ndvi_z_peer`/`rvi_z_peer` on training
+  rows only, per fold, under three keys — `leaky` (whole-frame control), `cluster_month`, and
+  `geo_month` (latitude/elevation bands) — closing the leak where the old whole-frame fit let a
+  held-out cluster's bucket draw from itself. `argotech/lab/arms/export.py` remains the one place that
+  fits on the whole panel, deliberately: a shipped artifact runs at inference time, where there is no
+  future to leak from. Results and the multiple-comparisons argument governing them: §9.2.
+- **`argotech/lab/eval/splits.py`** corrects the temporal split to purged/embargoed forward chaining —
+  training takes `label_date < boundary`, test takes `obs_date >= boundary`, rows satisfying neither
+  are embargoed — replacing a cut on the prediction date that left the last month of training
+  outcomes known after the first test predictions were made. See §9.2.
+- **`argotech/lab/panel/panel.py`** enforces NDVI validity (`MIN_VALID_NDVI = 0.0`, `MIN_COHORT_SD =
+  0.005`) and fixes a peer-exclusion bug — peers were excluded by NDVI value rather than site
+  identity, silently dropping and biasing cohorts. The fix applies to future rebuilds only; the
+  committed panel was deliberately not rebuilt (§9.2, `docs/FACTS.md` §7.8–7.9).
 - `argotech/data/meteo.py` — one Open-Meteo client for both paths (ERA5 archive for training,
   forecast for serving), same daily variables, disk-cached, with backoff.
 - `argotech/features/agronomic.py` — **the single feature builder**, called by both training and

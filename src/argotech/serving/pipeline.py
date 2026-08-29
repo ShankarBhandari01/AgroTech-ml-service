@@ -13,8 +13,9 @@ terms. See docs/model-design.md §4.5.
 from __future__ import annotations
 
 import functools
+import logging
 import uuid
-from typing import Any, Optional
+from typing import Any
 
 import pandas as pd
 import requests
@@ -23,10 +24,21 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from argotech.data import meteo, store
+from argotech.config import settings
+from argotech.data import backend_schema, meteo, store
 from argotech.data.sentinel import sentinel_client
 from argotech.domain import agronomy, indices, risk
-from argotech.features.agronomic import WINDOW_DAYS, build, satellite_block
+from argotech.features.agronomic import (
+    WINDOW_DAYS,
+    assign_cluster,
+    build,
+    cluster_relative_row,
+    nearest_sar,
+    peer_bucket,
+    peer_reference,
+    radar_block,
+    satellite_block,
+)
 from argotech.models.registry import ModelManager
 from argotech.serving.schemas.request import FarmerPredictionRequest
 from argotech.serving.schemas.response import (
@@ -41,12 +53,77 @@ from argotech.serving.schemas.response import (
     VulnerabilityDetail,
 )
 
+logger = logging.getLogger(__name__)
+
 OPEN_METEO_TIMEOUT_SECONDS = 6
+
+# Written into `predictions.model_version` on the persistence path, so a stored row is always
+# traceable to what produced it. Bump it if `vegetation_hazard_from_anomaly` changes shape.
+PERSISTENCE_VERSION = "persistence-v1"
+
+
+def _severity_to_probabilities(hazard: float) -> PredictionProbabilities:
+    """Encode a scalar vegetation hazard as the 3-class vector the Kotlin client requires.
+
+    `probabilities` is typed `Map<String, Double>` downstream and is not optional, so a number has
+    to become three. Rather than invent a posterior — neither hazard source has one, since both
+    produce a single scalar — this puts all the mass on the two classes adjacent to the hazard
+    value, the unique distribution satisfying
+
+        h = 0.5 * p_medium + 1.0 * p_high
+
+    so a consumer computing expected severity recovers the hazard exactly. It is an encoding of one
+    scalar, not a confidence, and `probabilities_of` says so on the wire.
+    """
+    h = max(0.0, min(1.0, hazard))
+    if h <= 0.5:
+        low, medium, high = 1.0 - 2.0 * h, 2.0 * h, 0.0
+    else:
+        low, medium, high = 0.0, 2.0 - 2.0 * h, 2.0 * h - 1.0
+    return PredictionProbabilities(low=round(low, 3), medium=round(medium, 3), high=round(high, 3))
+
 
 # ponytail: farm-gate prices as a static per-crop table in USD/tonne. Exposure needs a price to be
 # expressed in currency at all; wire it to a market-price feed when one exists.
 FARMGATE_PRICE_USD_PER_T = {"maize": 250.0, "sorghum": 230.0, "rice": 420.0, "cassava": 120.0}
 DEFAULT_PRICE_USD_PER_T = 250.0
+
+# Per-crop yield baselines, measured on Nigeria GHS-Panel Wave 5 (`experiments/E07-lsms/`):
+# (median, p05, p95) t/ha over SOLE-CROPPED plots. Sole-cropped is the honest denominator -- 41.3%
+# of plots carry more than one crop, and dividing whole-plot area by each crop understates all of
+# them.
+#
+# These replace a single crop-blind constant. The previous fallback returned
+# `1.5 + (ndvi - 0.4) * 3.5` for every crop, which measured against this survey is 1.84x too high for
+# millet, 1.46x for maize, 1.38x for sorghum, and 0.67x too LOW for rice. One NDVI->yield line cannot
+# serve maize grain (0.80 t/ha) and cassava tubers (2.50 t/ha fresh weight) at once.
+#
+# This matters in proportion to E07's other finding: `yield` accounts for 42.4% of the variance in
+# `expected_loss` -- nearly double the entire hazard model's 22.5% -- so a 1.4-1.8x bias on Nigeria's
+# dominant cereals is not a rounding error in who gets an extension visit.
+#
+# CAVEAT, carried deliberately: GHS-Panel is a national survey sample, not this product's registered
+# farmers, and its yields validate against FAO only for some crops (rice 0.87x, sorghum 0.84x agree;
+# maize 0.44x, cassava 0.21x do not -- cassava is harvested piecemeal, so a post-harvest visit sees
+# harvest-to-date, not the season). These are better than a crop-blind 1.5 and are still a prior, not
+# a measurement of any real farmer. See experiments/E07-lsms/FINDINGS.md for the falsification test.
+YIELD_BASELINE_T_HA = {
+    "maize":   (0.80, 0.05, 7.50),      # n=875
+    "sorghum": (0.84, 0.12, 5.36),      # n=182
+    "rice":    (1.75, 0.20, 18.70),     # n=487
+    "cassava": (2.50, 0.13, 31.09),     # n=535
+    "millet":  (0.63, 0.13, 6.97),      # n=122
+    "cowpea":  (0.56, 0.03, 8.24),      # n=42
+}
+DEFAULT_YIELD_T_HA = (1.25, 0.09, 17.88)   # all sole-cropped plots, n=3013
+
+# NDVI sensitivity, expressed as a PROPORTION of the crop's baseline rather than an absolute t/ha.
+# 3.5 / 1.5 is exactly the old formula's relative slope, so with a 1.5 baseline this reproduces
+# `1.5 + (ndvi - 0.4) * 3.5` identically -- the change is a generalisation, not a new model. Absolute
+# sensitivity would be wrong across crops: a bump in greenness cannot add the same tonnage to millet
+# at 0.63 t/ha as to cassava at 2.50.
+YIELD_NDVI_SENSITIVITY = 3.5 / 1.5
+YIELD_NDVI_ANCHOR = 0.4
 
 
 def _leaf_wetness(lat: float, lon: float) -> list:
@@ -64,13 +141,16 @@ def _leaf_wetness(lat: float, lon: float) -> list:
         hourly = res.json().get("hourly", {})
         temps, rhs = hourly.get("temperature_2m", []), hourly.get("relative_humidity_2m", [])
     except Exception as e:  # noqa: BLE001
-        print(f"[pipeline] hourly weather unavailable: {e}")
+        logger.warning("hourly weather unavailable for (%.4f, %.4f): %s", lat, lon, e)
         return []
 
     days = []
     for start in range(0, len(temps) - 23, 24):
         t_day = [t for t in temps[start:start + 24] if t is not None]
-        wet = [t for t, rh in zip(temps[start:start + 24], rhs[start:start + 24])
+        # strict=False deliberately: Open-Meteo can return a shorter humidity series than
+        # temperature one on a partial response, and a short day is worth fewer wet hours — not a
+        # 500 on the whole prediction.
+        wet = [t for t, rh in zip(temps[start:start + 24], rhs[start:start + 24], strict=False)
                if t is not None and rh is not None and rh >= 90]
         if wet:
             days.append((sum(wet) / len(wet), len(wet)))
@@ -79,7 +159,8 @@ def _leaf_wetness(lat: float, lon: float) -> list:
     return days
 
 
-async def gather_upstream(lat: float, lon: float, crop: str) -> tuple[dict, dict]:
+async def gather_upstream(lat: float, lon: float, crop: str,
+                          cluster_bounds: dict, peer_stats: dict) -> tuple[dict, dict]:
     """Every upstream call for one field, in one place: ERA5 daily, Sentinel-2 history, hourly leaf
     wetness, and the 4-year rainfall climatology.
 
@@ -89,6 +170,7 @@ async def gather_upstream(lat: float, lon: float, crop: str) -> tuple[dict, dict
     """
     payload = await run_in_threadpool(functools.partial(meteo.fetch_recent, lat, lon, 92))
     history = await run_in_threadpool(sentinel_client.fetch_history, lat, lon, 365)
+    sar = await run_in_threadpool(sentinel_client.fetch_sar_history, lat, lon, 365)
     wet_days = await run_in_threadpool(_leaf_wetness, lat, lon)
 
     if not payload:
@@ -96,6 +178,10 @@ async def gather_upstream(lat: float, lon: float, crop: str) -> tuple[dict, dict
     daily = meteo.daily_frame(payload)
     if len(daily["time"]) < WINDOW_DAYS:
         raise HTTPException(503, "Insufficient weather history for the 90-day feature window.")
+    # A variable absent from the whole response would otherwise be read as an observed zero series:
+    # no evapotranspiration means no water demand, so the field looks perfectly watered. Refuse.
+    if not meteo.has_all_variables(daily):
+        raise HTTPException(503, "Weather upstream returned an incomplete variable set.")
 
     # ---- canopy state ----
     crop_health = None
@@ -103,7 +189,19 @@ async def gather_upstream(lat: float, lon: float, crop: str) -> tuple[dict, dict
         latest = history[-1]
         series = [o["ndvi"] for o in history]
         mean = sum(series) / len(series)
-        sat = satellite_block(latest, series[:-1], series[:-1])
+        # Radar joins on the nearest date within `nearest_sar`'s tolerance, the same join the
+        # training set was built with. Peers are the site's own past observations, mirroring what
+        # the optical block above does — serving has no concurrent cross-site cohort, and inventing
+        # a second convention for radar would be a skew of its own.
+        matched_sar = nearest_sar(sar, latest["sensing_date"])
+        # The peer anomaly is standardised against the artifact's (cluster, month) reference — the
+        # same constants `dataset.py` built the training features with. Serving holds one row and
+        # cannot compute a cohort, and the previous substitution (this site's own 12-month history)
+        # made `ndvi_z_peer` a seasonal self-anomaly rather than a peer one: correlated 0.626 with
+        # the training column, 25.5% of fields flipping sign.
+        bucket = peer_bucket(assign_cluster(lat, lon, cluster_bounds), latest["sensing_date"])
+        sat = {**satellite_block(latest, series[:-1], peer_reference(peer_stats, bucket, "ndvi")),
+               **radar_block(matched_sar, peer_reference(peer_stats, bucket, "rvi"))}
         crop_health = indices.crop_health_index(
             current_ndvi=latest["ndvi"], ndmi_value=latest["ndwi"],
             ndvi_min=min(series), ndvi_max=max(series),
@@ -142,37 +240,44 @@ class PredictionsService:
         self.model_manager = model_manager
         self.data = data
         self.db = db
+        # Set by `_fetch_farmer_data`. Left as "provided" for callers that hand a farmer object to
+        # `predict_from_farmer_data` directly (coldstart's synthetic farmer) rather than going
+        # through the fetch — there is no payload/database choice to log on that path.
+        self.farmer_source = "provided"
 
     # ------------------------------------------------------------------ data
 
     async def _fetch_farmer_data(self):
+        # Expand/migrate/contract, Task 1: the deployed backend sends only `farmer_id`, so the
+        # database read stays the fallback for as long as that is true. A payload skips the backend
+        # schema entirely — no uuid check, no query — which is the point of sending one.
+        payload = getattr(self.data, "farmer", None)
+        if payload is not None:
+            self.farmer_source = "payload"
+            logger.info("field=%s farmer data source=payload", self.data.farmer_id)
+            return payload
+
         # farmer_profiles.user_id is a uuid column, so a malformed id reaches Postgres as a cast
         # error rather than an empty result — a 500 with the whole SQL statement in the response
         # body. Reject it here as the not-found it actually is.
         try:
             uuid.UUID(str(self.data.farmer_id))
-        except (ValueError, AttributeError, TypeError):
-            raise HTTPException(404, f"Farmer '{self.data.farmer_id}' not found in database.")
+        except (ValueError, AttributeError, TypeError) as e:
+            raise HTTPException(
+                404, f"Farmer '{self.data.farmer_id}' not found in database.") from e
 
-        query = text("""
-            SELECT
-                fp.user_id, fp.farm_size, fp.state, fp.latitude, fp.longitude, fp.crops,
-                fmp.yield_value, fmp.has_extension_access, fmp.household_max_education,
-                fmp.shock_level, fmp.received_assistance, fmp.used_fertilizer,
-                fmp.household_size, fmp.transport_cost, fmp.dependency_ratio,
-                fmp.asset_score, fmp.postharvest_activity_score, fmp.digital_access_score,
-                fmp.has_veterinary_access, fmp.market_access_score, fmp.received_credit,
-                fmp.head_gender,
-                (SELECT COUNT(*) FROM farmers_crops WHERE farmer_id = fp.user_id) as crop_diversity_score
-            FROM farmer_profiles fp
-            LEFT JOIN farmers_ml_profiles fmp ON fmp.farmer_id = fp.user_id
-            WHERE fp.user_id = :farmer_id
-        """)
+        # The query lives in `data/backend_schema.py`, with every other read of the Kotlin
+        # backend's tables. It used to be written out here AND in jobs/precompute.py, and the two
+        # drifted: when the backend replaced `farms.crops` with a `farm_crops` join table, this copy
+        # started failing outright while the other silently fell back to a hardcoded crop. One
+        # definition means the next migration breaks one query loudly instead of two quietly.
         result = await run_in_threadpool(
-            self.db.execute(query, {"farmer_id": self.data.farmer_id}).fetchone
+            backend_schema.fetch_farmer_features, self.db, self.data.farmer_id
         )
         if not result:
             raise HTTPException(404, f"Farmer '{self.data.farmer_id}' not found in database.")
+        self.farmer_source = "database"
+        logger.info("field=%s farmer data source=database", self.data.farmer_id)
         return result
 
     # ------------------------------------------------------------------ inference
@@ -185,17 +290,32 @@ class PredictionsService:
         if lat is None or lon is None:
             raise HTTPException(422, "Prediction requires latitude and longitude.")
         lat, lon = float(lat), float(lon)
+        # The coldstart schema bounds its own input; this covers the farmer path, where the
+        # coordinates come out of farmer_profiles unvalidated. Out of range they reach Open-Meteo
+        # and CDSE as a 400 each, and the request degrades into a prediction built from nothing.
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            raise HTTPException(422, f"Coordinates ({lat}, {lon}) are out of range.")
         crop = self._crop_name(farmer)
         field_id = self.data.farmer_id
 
         # Precomputed row when the nightly job has produced a fresh one, live upstream otherwise.
         # The fallback is deliberately kept: a new field registered this morning still gets a
         # prediction today, it just pays the latency once.
-        cached = store.read_latest_features(self.db, field_id) if self.db is not None else None
+        # Loaded regardless of VEGETATION_HAZARD_SOURCE: the peer reference is a *fitted* statistic,
+        # so both hazard sources depend on it. Persistence reads `ndvi_z_peer`, and that column is
+        # only meaningful against the reference the model was fitted with.
+        model, columns, artifact_version, bounds, stats, peer_ref = \
+            self.model_manager.agronomic_model()
+
+        # Offloaded like every other blocking call in this method. Synchronous SQLAlchemy
+        # inside `async def` holds the event loop for its whole duration, so on a single
+        # uvicorn worker it serialises every concurrent request behind this one query.
+        cached = (await run_in_threadpool(store.read_latest_features, self.db, field_id)
+                  if self.db is not None else None)
         if cached:
             row, ctx, feature_source = cached["features"], cached["context"], "precomputed"
         else:
-            row, ctx = await gather_upstream(lat, lon, crop)
+            row, ctx = await gather_upstream(lat, lon, crop, bounds, peer_ref)
             feature_source = "live"
 
         sat = ctx["sat"]
@@ -203,18 +323,45 @@ class PredictionsService:
         crop_health = ctx.get("crop_health")
         dsv_total, spray_due = ctx["dsv_total"], ctx["spray_due"]
 
-        # ---- learned vegetation hazard ------------------------------------
+        # Which trained region this field falls in, or None when it falls outside every one. Computed
+        # unconditionally because it is reported on the response either way: None means the model is
+        # extrapolating, and that is true regardless of which hazard source is configured.
+        cluster = assign_cluster(lat, lon, bounds)
+        if cluster is None:
+            logger.warning("field=%s (%.4f, %.4f) falls outside every trained cluster — the "
+                           "cluster-relative twins and the peer anomaly will be NaN", field_id,
+                           lat, lon)
+
+        # ---- vegetation hazard --------------------------------------------
         vegetation_hazard, probabilities = 0.0, None
         model_version = "none"
+        probabilities_of = PredictionResponse.model_fields["probabilities_of"].default
         if index_source == "sentinel-2":
-            model, columns, model_version = self.model_manager.agronomic_model()
-            proba = await run_in_threadpool(model.predict_proba, pd.DataFrame([row])[columns])
-            p = proba[0]
-            # Expected severity on 0-1: the ranking score, and the term fed into the composition.
-            vegetation_hazard = float(p[1] * 0.5 + p[2] * 1.0)
-            probabilities = PredictionProbabilities(low=round(float(p[0]), 3),
-                                                    medium=round(float(p[1]), 3),
-                                                    high=round(float(p[2]), 3))
+            if settings.VEGETATION_HAZARD_SOURCE == "model":
+                # Derived here rather than in `gather_upstream` so a `field_features` row stored by
+                # an older precompute run still gets its twins — arithmetic over the raw row and
+                # the artifact's snapshot, with no upstream call to pay for.
+                row = {**row, **cluster_relative_row(row, stats.get(cluster))}
+                model_version = artifact_version
+                zhat = await run_in_threadpool(model.predict, pd.DataFrame([row])[columns])
+                forecast_z = float(zhat[0])
+                logger.info("field=%s forecast_z=%+.3f from model %s (cluster %s)",
+                            field_id, forecast_z, model_version, cluster)
+            else:
+                # Persistence: the field's *observed* anomaly, carried forward unchanged.
+                forecast_z, model_version = row.get("ndvi_z_peer"), PERSISTENCE_VERSION
+
+            # One mapping for both sources: where z comes from differs — observed today, or predicted
+            # 30 days out — but the logistic centre/softness are the same fixed constants either way.
+            # That makes the *ranking* comparison like-for-like (the rho/P@25 gain that justified this
+            # switch). It does not make the *magnitude* comparable: a regressor predicts a conditional
+            # mean, which is compressed relative to the observation it predicts (std 0.508 vs. 1.165
+            # on the training set), so the model path yields systematically smaller vegetation hazards
+            # than persistence would have for the same field — a gap the rank metrics cannot see.
+            vegetation_hazard = risk.vegetation_hazard_from_anomaly(forecast_z)
+            probabilities = _severity_to_probabilities(vegetation_hazard)
+            probabilities_of = ("vegetation hazard (peer-relative canopy stress, 30-day horizon) — "
+                                "encoded from a scalar, not a fitted posterior")
 
         # ---- composition ---------------------------------------------------
         hazard = risk.assess_hazard(
@@ -223,21 +370,38 @@ class PredictionsService:
             cumulative_dsv=dsv_total,
             heat_days=row["heat_stress_days"],
             vegetation=vegetation_hazard,
+            # Added after E07: pests (9.2% of households) and excess rain (10.6%) are among the
+            # most-reported agronomic shocks and had no term. Both upstreams were already in the
+            # feature row -- `fall_armyworm_generations` existed in domain.agronomy and was wired
+            # into nothing. `weed_pressure` is deliberately not passed: weeds are the LARGEST
+            # reported agronomic shock (15.7%) and no feed carries a weeding signal, so the term
+            # stays inert rather than contributing a constant. See notebooks/08-lsms-eda.ipynb.
+            gdd_since_onset=row.get("gdd_since_onset"),
+            rain_anomaly_mm=row.get("rain_anomaly_30"),
         )
         exposure = risk.assess_exposure(
             area_ha=self._parse_farm_size(farmer.farm_size),
-            expected_yield_t_ha=self._expected_yield(farmer, sat["ndvi"]),
+            expected_yield_t_ha=self._expected_yield(farmer, sat["ndvi"], crop),
             price_per_t=FARMGATE_PRICE_USD_PER_T.get(crop.lower(), DEFAULT_PRICE_USD_PER_T),
         )
         vulnerability = risk.assess_vulnerability(self._coping_signals(farmer))
         assessment = risk.assess_risk(hazard, exposure, vulnerability)
+
+        logger.info("field=%s crop=%s features=%s farmer_source=%s indices=%s model=%s -> %s "
+                    "risk=%s%% dominant=%s vegetation=%.3f", field_id, crop, feature_source,
+                    self.farmer_source, index_source, model_version, assessment.severity,
+                    assessment.risk_score, hazard.dominant, vegetation_hazard)
 
         # ---- audit row -----------------------------------------------------
         # Written before the response is returned so the id can be handed back: the agent app links
         # its outcome report to this prediction, which is what turns advisories into training data.
         prediction_id = None
         if self.db is not None:
-            prediction_id = store.write_prediction(
+            # Offloaded for the same reason as the read above. This one is on the response
+            # path by design — the id is handed back so an outcome can be linked to it — so it
+            # stays synchronous with respect to the response, just not to the event loop.
+            prediction_id = await run_in_threadpool(
+                store.write_prediction,
                 self.db, field_id, model_version, feature_source, row, assessment,
                 probabilities.model_dump() if probabilities else None)
 
@@ -259,6 +423,7 @@ class PredictionsService:
             priority_label={0: "Low Priority", 1: "Medium Priority", 2: "High Priority"}[pred_val],
             risk_score_percent=assessment.risk_score,
             probabilities=probabilities or PredictionProbabilities(low=1.0, medium=0.0, high=0.0),
+            probabilities_of=probabilities_of,
             top_risk_factors=drivers,
             inference=InferenceDetail(
                 risk_level=assessment.severity,
@@ -266,6 +431,7 @@ class PredictionsService:
                 probability=round(hazard.combined, 3),
                 primary_drivers=drivers[:4],
                 model_contributed=index_source == "sentinel-2",
+                cluster=cluster,
             ),
             risk_assessment=RiskAssessmentDetail(
                 risk_score=assessment.risk_score,
@@ -298,12 +464,10 @@ class PredictionsService:
 
     @staticmethod
     def _crop_name(farmer) -> str:
-        crops = farmer.crops
-        if isinstance(crops, list) and crops:
-            return str(crops[0]).strip()
-        if isinstance(crops, str) and crops.strip():
-            return crops.split(",")[0].strip()
-        return "Maize"
+        # One definition, shared with the nightly precompute — see data/backend_schema.py. The
+        # "Maize" fallback lives there too, so both callers make the same assumption about a field
+        # whose crops were never captured.
+        return backend_schema.dominant_crop(farmer.crops)
 
     @staticmethod
     def _parse_farm_size(val: Any) -> float:
@@ -317,11 +481,18 @@ class PredictionsService:
         return 1.0
 
     @staticmethod
-    def _expected_yield(farmer, ndvi: float) -> float:
-        """Reported yield when the survey has one; otherwise an NDVI-anchored estimate.
+    def _expected_yield(farmer, ndvi: float, crop: str | None = None) -> float:
+        """Reported yield when the survey has one; otherwise a per-crop NDVI-anchored estimate.
 
-        Explicitly a placeholder for the yield-anomaly regression in docs/model-design.md §4.4,
-        which needs a season of harvest records that do not exist yet.
+        Still a placeholder for the yield-anomaly regression in docs/model-design.md §4.4, which
+        needs a season of harvest records that do not exist yet — but a per-crop one. The baselines
+        come from GHS-Panel Wave 5 (`YIELD_BASELINE_T_HA`); the crop-blind 1.5 t/ha it replaces was
+        1.84x too high for millet and 0.67x too low for rice.
+
+        The NDVI term scales the crop's own baseline instead of adding an absolute tonnage, and the
+        clip is the crop's own observed [p05, p95] rather than a global [0.5, 5.0] — under the old
+        global ceiling no imputed value could ever reach the high-yield tail that root crops
+        actually occupy (cassava p95 is 31 t/ha fresh weight).
         """
         reported = getattr(farmer, "yield_value", None)
         # A zero yield is an unfilled survey field, not a farm that harvests nothing. Taken
@@ -329,7 +500,9 @@ class PredictionsService:
         # queue ranked by expected loss — the ranking inverts precisely for the farms that matter.
         if reported is not None and float(reported) > 0:
             return float(reported)
-        return round(max(0.5, min(5.0, 1.5 + (ndvi - 0.4) * 3.5)), 2)
+        base, lo, hi = YIELD_BASELINE_T_HA.get((crop or "").strip().lower(), DEFAULT_YIELD_T_HA)
+        estimate = base * (1.0 + YIELD_NDVI_SENSITIVITY * (ndvi - YIELD_NDVI_ANCHOR))
+        return round(max(lo, min(hi, estimate)), 2)
 
     @staticmethod
     def _coping_signals(farmer) -> dict:

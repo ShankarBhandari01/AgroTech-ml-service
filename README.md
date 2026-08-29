@@ -28,6 +28,7 @@ backend's `docker-compose.prod.yml` on a single GCE VM.
 - [Training](#training)
 - [Troubleshooting](#troubleshooting)
 - [Known issues](#known-issues)
+- [Two install surfaces](#two-install-surfaces)
 - [Repository layout](#repository-layout)
 
 ---
@@ -45,6 +46,12 @@ compose network at `http://ml:8000` via `FASTAPI_ML_URL`.
 | Feature assembly, agronomy, model inference, risk composition | This service |
 | Prediction audit trail and outcome capture | This service (`predictions`, `field_outcomes`) |
 | Map-tile / raster visualisation | Kotlin backend (this service uses only the CDSE **Statistical** API) |
+| Intervention tracking (who was visited, what was advised, what was applied) | **Assigned to** the Kotlin backend. This service records only its own predictions and the outcome reports posted back to `/outcomes`; it has no intervention model. Not verified against `agri-saas-kotlin-backend` — treat as the assignment, not as a statement about what exists there |
+| Populating `farmers_ml_profiles` (`asset_score`, `market_access_score`, credit, extension, fertiliser, …) | **Assigned to** the Kotlin backend / its survey ingestion. Nothing in this repository writes that table. The join is a `LEFT JOIN`, so an absent row is silent: `asset_score` defaults to 45.0 and `market_access_score` to 50.0, which makes every such farmer score as exactly average on two of the seven coping factors |
+| Operator dashboard (model health, feature and prediction drift, calibration, precision@k on realised visits) | **Not built anywhere yet.** `docs/model-design.md` §Model health describes these as "dashboarded"; this service emits the inputs (`predictions`, `field_outcomes`) and nothing consumes them. There is no owner |
+
+Rows marked **Assigned to** are ownership statements about where a capability belongs, not
+verified claims about what the other repository currently implements.
 
 The backend calls it from `FastApiMlClientImpl.kt` and `PredictionQueueConsumer`, and degrades to a
 static `FALLBACK` payload when unreachable — which is why `ml` is deliberately **not** in the `app`
@@ -64,7 +71,7 @@ Risk = Hazard × Exposure × Vulnerability
 | Term | Source | Needs training data? |
 | --- | --- | --- |
 | **Hazard** — drought, disease, heat | FAO-56 water balance, Wallin/BLITECAST severity values, flowering heat-stress days | No. Physics and epidemiology. |
-| **Hazard** — vegetation | The trained model, entering as one more independent hazard via noisy-OR | Yes |
+| **Hazard** — vegetation | By default a regressor predicting the field's peer anomaly 30 days ahead (`HistGradientBoostingRegressor` on `forward_z`). Persistence — carrying the field's own observed value forward — is the `VEGETATION_HAZARD_SOURCE=persistence` alternative | Yes (model artifact required by default) |
 | **Exposure** | `area × expected yield × farm-gate price`, in USD | No |
 | **Vulnerability** | Weighted coping capacity: irrigation, extension access, credit, inputs, diversification, assets, market access | No |
 
@@ -133,7 +140,7 @@ sequenceDiagram
         else missing or stale
             PS->>PS: gather_upstream() — ERA5, Sentinel-2, hourly RH, climatology
         end
-        PS->>PS: model → vegetation hazard; domain.risk → H × E × V
+        PS->>PS: model → vegetation hazard, domain.risk → H × E × V
         PS->>PG: INSERT predictions (features, version, score) → prediction_id
         PS-->>BE: PredictionResponse
     end
@@ -155,8 +162,11 @@ Base URL in production: `http://ml:8000` (compose-internal). No auth on any rout
 | `GET` | `/outcomes/label-count` | `?horizon_days=30` | How many prediction↔outcome pairs exist |
 | `GET` | `/docs`, `/openapi.json` | — | FastAPI defaults, not disabled |
 
-`model_name` / `model_alias` remain on the request schemas for backward compatibility with the
-Kotlin client and are ignored — there is one model now.
+`model_name` / `model_alias` are gone from the request schemas. They named an MLflow registry entry
+that no loader has read since the registry rewrite, and having them on the wire suggested a
+per-request model choice that does not exist. Pydantic ignores unknown fields, so a Kotlin client
+still sending them keeps working unchanged. What answered a given request is reported back in
+`model_version`; which source is configured service-wide is `VEGETATION_HAZARD_SOURCE`.
 
 ### Response — `PredictionResponse`
 
@@ -170,7 +180,7 @@ Kotlin client and are ignored — there is one model now.
 | `crop_type`, `phenology_stage` | Stage is derived from GDD accumulated since the rainy-season onset |
 | `prediction`, `priority_label` | `0`/`1`/`2`, Low/Medium/High Priority |
 | `risk_score_percent` | Expected loss rate, 0–100 |
-| `probabilities` | Calibrated model probabilities. All in `low` when the model did not contribute |
+| `probabilities` | The **vegetation hazard scalar re-encoded** across three classes so that `0.5×medium + 1.0×high` recovers it exactly — an encoding, not a fitted posterior. All in `low` when no vegetation term contributed. `probabilities_of` says the same thing on the wire |
 | `top_risk_factors` | Drivers, most specific first |
 | `inference` | `{risk_level, dominant_hazard, probability, primary_drivers, model_contributed}` |
 | `risk_assessment` | `{risk_score, expected_loss_usd, value_at_risk_usd, hazard{...}, vulnerability{...}}` |
@@ -283,7 +293,8 @@ comes from the container environment or the default.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | `postgresql://postgres:password@localhost:5432/agrotech` | Reads the backend's farmer tables; owns `field_features`, `predictions`, `field_outcomes`. A `postgres://` prefix is rewritten |
-| `AGRONOMIC_MODEL_PATH` | `artifacts/agronomic_risk.joblib` | Model artifact, loaded by relative path from the working directory |
+| `AGRONOMIC_MODEL_PATH` | `artifacts/agronomic_risk.joblib` | Model artifact, loaded by relative path from the working directory. Only read when `VEGETATION_HAZARD_SOURCE=model` |
+| `VEGETATION_HAZARD_SOURCE` | `model` | Where the peer anomaly fed to the hazard map comes from. `model` predicts it 30 days ahead (`HistGradientBoostingRegressor` on `forward_z`); `persistence` carries the field's own observed value forward. Same mapping either way. See [The model](#the-model) |
 | `SENTINEL_CLIENT_ID` | `""` | CDSE OAuth client id. Blank disables the satellite path entirely |
 | `SENTINEL_CLIENT_SECRET` | `""` | CDSE OAuth client secret |
 | `SENTINEL_TOKEN_URL` | CDSE Keycloak token endpoint | Override for commercial Sentinel Hub |
@@ -294,9 +305,11 @@ Read from the environment directly, not through `Settings`:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | When set, adds a `BatchSpanProcessor` with an OTLP/HTTP exporter. Left unset in production so the exporter does not retry against a dead endpoint forever |
+| `LOG_LEVEL` | `INFO` | Root log level. `INFO` gives one arrival and one completion line per request (with status and latency), the parsed request body, a response summary, and which source answered the vegetation hazard |
 
 `USE_LOCAL_MODEL`, `MLFLOW_TRACKING_URI`, `MODEL_NAME` and `MODEL_ALIAS` are gone with the MLflow
-path. `extra="ignore"` means a compose file still setting them is harmless.
+path, and have now been dropped from `.env` as well — they had outlived the loader that read them by
+several commits. `extra="ignore"` means a compose file still setting them is harmless.
 
 Without Sentinel credentials the service still works: `crop_health` is null, `probabilities` collapse
 to `low: 1.0`, and the drought/disease/heat hazards carry the assessment on their own.
@@ -307,7 +320,7 @@ to `low: 1.0`, and the drought/disease/heat hazards carry the assessment on thei
 
 ```bash
 python3.11 -m venv .venv && source .venv/bin/activate
-pip install -e '.[train,dev]'
+pip install -e '.[lab,dev]'
 
 uvicorn argotech.serving.main:app --host 0.0.0.0 --port 8000 --reload
 ```
@@ -395,63 +408,120 @@ The healthcheck uses `python`, not `curl` or `wget` — the slim base image ship
 
 ## The model
 
-One artifact: `artifacts/agronomic_risk.joblib` (~1.5 MB). A `HistGradientBoostingClassifier` under
-a cross-fit `CalibratedClassifierCV(method="sigmoid", cv=5)`. The bundle carries its own
-`feature_columns` and `version`, so the column contract is explicit at load time and every persisted
-prediction is traceable to the artifact behind it.
+One artifact: `artifacts/agronomic_risk.joblib` (202 KB). A `HistGradientBoostingRegressor`
+predicting `forward_z` — the field's peer-standardised NDVI anomaly 30 days ahead. The bundle carries
+its own `feature_columns` and `version`, so the column contract is explicit at load time and every
+persisted prediction is traceable to the artifact behind it. (The earlier `HistGradientBoostingClassifier`
+under `CalibratedClassifierCV(method="sigmoid", cv=5)` still exists as a control arm in `training/train.py`
+for comparison.)
 
-**It is one hazard term, not the risk score.** Trained on 7,527 real samples across 185 sites and
-6 Sub-Saharan clusters. On spatially blocked evaluation it beats persistence on the operational
-ranking metric — mean precision@25 of 0.693 against 0.460, winning 5 of 6 held-out clusters — and is
-well calibrated (mean ECE 0.093). It still trails persistence on macro F1 (0.412 vs 0.450) and on
-temporal generalisation, so it contributes the vegetation hazard rather than the headline score.
+**It is one hazard term, not the risk score**, and as of 2026-08-21 it is **the default source** —
+`VEGETATION_HAZARD_SOURCE=model`.
 
-Permutation importance on held-out ground is led by `ndmi` and `evi`, with real contributions from
-the agronomy (`et0_90`, `dry_spell_30`, `stage_kc`) — at half this sample size the model was
-effectively a smoothed persistence model, and [`docs/model-design.md` §9](docs/model-design.md)
-records both results and why they differ.
+Every number below is the fold mean recorded in `artifacts/metrics.json` for artifact
+`agro-20260821T065051Z` (6,957 samples, 185 sites, seed 42). **Two** baselines matter, not one —
+citing persistence alone flatters the model, because site climatology is the stronger opponent.
 
-Do not promote it to the primary signal without new evidence on the same protocol.
+| Leave-one-cluster-out (6 folds) | P@25 | rho | macro F1 |
+| --- | --- | --- | --- |
+| **Regressor (`hgbr`, production)** | **0.760** | 0.377 | 0.441 |
+| Site climatology | 0.680 | 0.363 | 0.453 |
+| Persistence | 0.467 | 0.368 | 0.456 |
+| Classifier arm (`hgb`, control) | 0.647 | 0.235 | — |
+| Majority class | — | — | 0.271 |
+
+The case for the default is **P@25 under spatial blocking, and nothing else**: the regressor is
+ahead of persistence in 6 of 6 folds and of climatology in 4 of 6. On rho the three are within
+0.014 of one another, which is not a result. On macro F1 both baselines are ahead of it.
+
+Forward in time it is weaker, and this is the standing caveat:
+
+| Forward-chaining temporal (3 folds) | P@25 | rho | macro F1 |
+| --- | --- | --- | --- |
+| **Regressor** | 0.493 | **0.476** | 0.424 |
+| Site climatology | **0.587** | 0.475 | **0.473** |
+| Persistence | 0.533 | 0.428 | 0.418 |
+
+The regressor **loses P@25 to both baselines** out of sample in time, and only draws level with
+climatology on rho. The spatial advantage does not transfer to the temporal protocol, so "works in
+a district we have not seen" is supported and "works next month" is not.
+
+Ranked metrics cannot see a further structural limitation: because the regressor predicts a
+*conditional mean*, its output is compressed relative to what it predicts (predicted std 0.508,
+observed `forward_z` std 1.165, persistence's `ndvi_z_peer` 1.517). The model path therefore yields
+systematically smaller vegetation hazards — exceeding 0.5 on 2.2% of training fields against
+persistence's 14.2%.
+
+Set `VEGETATION_HAZARD_SOURCE=persistence` to A/B against the default. It does **not** disable the
+satellite path: both sources need a cloud-free Sentinel-2 scene, and persistence needs one more
+directly than the model does. The satellite path is disabled by leaving `SENTINEL_CLIENT_ID` blank,
+which drops the vegetation term entirely and leaves the physical hazards to carry the assessment.
+
+The earlier classifier lost because the label is a z-score *within* a (cluster, date) cohort, so it
+cancels whatever the cohort shares — and the weather block is exactly that. Weather features retain
+19.7% of their variance inside a cohort and correlate 0.027 with the target; canopy features retain
+74.9% and correlate 0.127. The strongest single feature, `ndvi_z_peer`, reaches 0.256, and it is the
+same quantity persistence uses on its own. An unregularised classifier fit reaches macro F1 1.000
+in-sample, so capacity was never the constraint.
+
+Permutation importance on the regressor's held-out ground (`permutation_importance` in
+`artifacts/metrics.json`) is **entirely canopy and radar** at the top — `ndvi_z_peer` +0.0322,
+`ndmi` +0.0172, `evi` +0.0157, `rvi_z_peer` +0.0153, `ndvi` +0.0120. The first weather column is
+`rain_90_cz` at +0.0117, an order of magnitude below the leader, and twelve of the forty columns
+score *negative*, including `dry_spell_30` (−0.0021), `rain_30` (−0.0020) and `radiation_90`
+(−0.0052). `stage_kc` is exactly 0.0. The honest reading is that the agronomy block is close to
+inert under a peer-standardised label; [`docs/model-design.md` §9](docs/model-design.md) records the
+results and why they differ from the classifier.
+
+The regressor's promotion to the primary signal is justified by P@25 under one specific protocol —
+leave-one-cluster-out, seed 42 — and by nothing else. Further evidence before widening the
+deployment scope would need to cover: the temporal loss above, robustness to missing satellite data
+in operational clusters, run-to-run variance across seeds, and performance on fields outside the
+185-site training cohort.
 
 ---
 
 ## Training
 
-```bash
-pip install -e '.[train]'
+The lab (`argotech/lab/`) replaces the retired `argotech.training` package. Building the model has
+two separate jobs: `lab.run` *evaluates* a candidate against honest, leakage-free folds; only
+`lab.arms.export` writes the artifact `models/registry.py` loads and `serving/pipeline.py` runs, and it
+does that by fitting on the *whole* panel — deliberately, and documented as such in
+`lab/arms/export.py`'s own docstring, since a shipped artifact scores one row at a time with no future to
+leak from. See `docs/superpowers/specs/2026-08-26-two-way-demeaned-estimand-design.md` for why the
+two are split.
 
-python -m argotech.training.dataset --sites 32 --years 4   # → data/training_set.parquet
-python -m argotech.training.train                          # → artifacts/agronomic_risk.joblib
+```bash
+pip install -e '.[lab]'
+
+python -m argotech.lab.panel.panel --sites 32 --years 4                # → data/training_set.parquet
+python -m argotech.lab.arms.export experiments/export-production.yaml # → artifacts/agronomic_risk.joblib
 ```
 
-The dataset is built from real measurements only: ERA5 daily reanalysis over the 90 days *before*
-each prediction date, passed through `argotech.domain`, plus the Sentinel-2 canopy state. The label
-is the peer-standardised NDVI anomaly one 30-day interval *ahead* — a future satellite observation,
-so no feature can determine its own target. Leakage controls are documented at the top of
-`argotech/training/dataset.py`.
+The panel is built from real measurements only: ERA5 daily reanalysis over the 90 days *before* each
+prediction date, passed through `argotech.domain`, plus the Sentinel-2 canopy state. The label is the
+peer-standardised NDVI anomaly one 30-day interval *ahead* — a future satellite observation, so no
+feature can determine its own target. Leakage controls are documented at the top of
+`argotech/lab/panel/panel.py`.
 
 The builder also fetches **Sentinel-1 backscatter** (`.cache/sentinel_sar/`, keyed separately so it
 can be added without invalidating the optical cache). Radar sees through cloud, which is the point:
 optical gaps cluster in the rainy season. It is additive — a site with no S1 coverage still yields
-samples, with the radar block as NaN. To measure what it buys, ablate it on the same parquet:
-
-```bash
-python -m argotech.training.train --data data/training_set.parquet             # radar on
-python -m argotech.training.train --data data/training_set.parquet --no-radar  # control
-```
-
-Compare on the *same* file. The builder keys its window off `date.today()`, so two builds made on
-different days are not a controlled comparison.
+samples, with the radar block as NaN. To measure what it buys, ablate it as a `lab.run` experiment
+(drop the radar columns from the config's `features` list) on the same parquet — the builder keys its
+window off `date.today()`, so two builds made on different days are not a controlled comparison.
 
 ### Frozen Presto embeddings (experimental)
 
 ```bash
-pip install -e '.[train]'                     # adds torch + einops, training-only
-python -m argotech.training.embed --data data/training_set_sar.parquet \
-                                  --out  data/presto_embeddings.parquet
-python -m argotech.training.train --data data/training_set_sar.parquet \
-                                  --embeddings data/presto_embeddings.parquet
+pip install -e '.[lab]'                     # adds torch + einops, training-only
+python -m argotech.lab.presto.embed --data data/training_set.parquet \
+                             --out  data/presto_embeddings.parquet
 ```
+
+Produces frozen embeddings keyed on `(site_id, obs_date)`. Nothing in the lab merges them onto a
+panel yet — that wiring was `training.train.py --embeddings`, retired with it — so this is a
+building block for a future experiment, not a runnable comparison today.
 
 [Presto](https://arxiv.org/abs/2304.14065) is a 402K-parameter transformer pre-trained on
 remote-sensing pixel timeseries — 12 monthly steps × 17 channels. It is **vendored**
@@ -472,24 +542,23 @@ Both upstreams are cached on disk under `.cache/`. A full build takes roughly 40
 seconds warm. **Open-Meteo's archive endpoint has a daily quota** that one full build can exhaust;
 if it starts returning 429 across the board, resume tomorrow — the cache preserves progress.
 
-`train.py` prints the whole evaluation, not a headline number: leave-one-cluster-out, forward
-chaining, **three** baselines (majority, persistence, site climatology), a linear shift-robustness
-arm beside the boosted trees, a decision-rule sweep, permutation importance on held-out ground,
-expected calibration error, and precision@k. Results are written to `artifacts/metrics.json`.
+`lab.run` prints the whole evaluation, not a headline number: leave-one-cluster-out, forward
+chaining, **five** arms per fold (zero, persistence, climatology, linear, boosted), net benefit at
+every decision threshold, precision@25, Spearman's rho, and a bootstrap CI over folds for each.
+Results are written to the config's `.result.json`, alongside a provenance block (data manifest
+hash, git SHA, seed) so a cited number always names the run that produced it. `lab.arms.export` prints no
+evaluation at all — it only fits and writes the artifact; a candidate is evaluated with `lab.run`
+*before* it is exported, never after.
 
-Two transforms are applied to the parquet at train time and need no dataset rebuild, because both
-derive from columns already in it:
+**Cluster-relative features** — a within-cluster z-score twin for each regionally-signatured
+feature, appended in `features/agronomic.py` and available to both `lab.run` and `lab.arms.export`. The
+label is already standardised against the peer cohort; these stop the inputs handing the model raw
+cluster identity. Label-free, so a held-out cluster normalising against its own statistics is not
+leakage — it is the mechanism.
 
-- **Cluster-relative features** — a within-cluster z-score twin for each regionally-signatured
-  feature. The label is already standardised against the peer cohort; these stop the inputs handing
-  the model raw cluster identity. Label-free, so a held-out cluster normalising against its own
-  statistics is not leakage — it is the mechanism.
-- **Site climatology** — each field's mean prior peer anomaly, as a third baseline. It asks "is this
-  field *usually* weak", where persistence asks "is it weak *right now*".
-
-A retrain that does not beat the incumbent and all three baselines on blocked CV should not be
-promoted — and "beat" has to name a metric, because macro F1 and precision@k currently disagree.
-See [`docs/model-design.md` §6](docs/model-design.md).
+A candidate that does not beat `zero` on net benefit with a non-overlapping interval should not be
+exported. See [`docs/model-design.md` §6](docs/model-design.md) and
+`docs/superpowers/specs/2026-08-26-two-way-demeaned-estimand-design.md`.
 
 ---
 
@@ -563,6 +632,32 @@ meaningful prediction without a location.
 | 9 | `has_irrigation` is not in the schema | Always 0, so vulnerability overstates every irrigated farm | Add to `farmers_ml_profiles` |
 | 10 | Images tagged by date | A tag does not identify the code that produced it | Tag with `$(git rev-parse --short HEAD)` |
 | 11 | No serving contract test | The Kotlin client's contract can drift silently | Golden-response test with mocked upstreams |
+
+---
+
+## Two install surfaces
+
+`serving` and `lab` share `config`, `data`, `domain`, `features` and `models.registry`; neither
+imports the other (`tests/test_import_boundary.py` enforces it). That one-directional dependency
+graph is what makes packaging them as two install surfaces cheap rather than a refactor:
+
+| | contents | installed by |
+| --- | --- | --- |
+| **serving surface** (default) | `config`, `data`, `domain`, `features`, `models.registry`, `jobs`, `serving` | `pip install .` — what the production image gets |
+| **research surface** | the above **plus** `lab` (panel, targets, peers, splits, arms, evaluate, run, export, embed, presto) | `pip install -e '.[lab]'` from a checkout |
+
+The production image cannot contain research code by construction: `argotech.lab` is excluded from
+the default install by `[tool.setuptools.packages.find]` in `pyproject.toml`, not by the Dockerfile
+remembering to leave it out.
+
+Where the non-code artifacts live, and why:
+
+- `experiments/` — **committed**. Results are the record; each carries a manifest hash, git SHA and
+  seed.
+- `notebooks/` — **committed, never packaged.** Reads committed CSVs and the panel.
+- `data/` — **gitignored**, one parquet whitelisted. A derived CSV in git is a second source of
+  truth that drifts.
+- `artifacts/` — the model bundle serving loads; produced only by `argotech.lab.arms.export`.
 
 ---
 

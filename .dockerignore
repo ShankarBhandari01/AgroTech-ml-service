@@ -11,11 +11,15 @@ __pycache__/
 .idea/
 .DS_Store
 .env
+.env.env.bak
 
 # Training-time state. The image only needs artifacts/agronomic_risk.joblib, which the Dockerfile
 # copies explicitly — do not exclude artifacts/.
 .cache/
-data/
+# Anchored to the build context root. Unanchored `data/` also matched `src/argotech/data/`, so
+# `COPY src src` silently shipped a package with no `argotech.data` and the image died on first
+# import at main.py:14. The exclusion is for the top-level parquet directory only.
+/data/
 mlruns/
 mlflow.db
 *.csv

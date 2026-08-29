@@ -1,7 +1,10 @@
 venv/
+# PyCharm's SDK for this project is registered at .venv/bin/python; a symlink to venv/ makes it resolve.
+.venv
 __pycache__/
 *.pyc
 .env
+.env.env.bak
 # macOS finder metadata — noise in every diff, never wanted in a commit.
 .DS_Store
 **/.DS_Store
@@ -18,7 +21,25 @@ mlflow.db
 
 # Cached upstream responses and built datasets.
 .cache/
-/data/
+# `/data/*` and not `/data/`: git never descends into an excluded directory, so a re-include
+# below it can never match. Excluding the contents instead leaves the negation reachable.
+/data/*
+
+# ...except the training set, which is tracked deliberately. It is the input every artifact was
+# fitted on, so an untracked copy makes a model unreproducible the moment the builder's upstreams
+# move — and Open-Meteo's archive is rate-limited, so "just rebuild it" is not always available.
+# A rebuild on a quota-exhausted day silently resolved 127 of 192 sites and overwrote the 185-site
+# set with a third fewer samples; nothing could restore it. 468 KB, and it changes only on retrain.
+!/data/training_set.parquet
+
+# ...and the site covariates, tracked for the same reason: SoilGrids and the elevation grid are
+# both rate-limited/unreliable free APIs, so an untracked copy makes this file unreproducible on
+# demand. 122 rows, static, changes only when the covariate builder is re-run.
+!/data/site_covariates.parquet
+
+# The Presto embeddings stay ignored: 4.6 MB each, reproducible from .cache/, and the encoder was
+# evaluated and rejected (see artifacts/experimental/). Tracking them would cost 14 MB for a
+# negative result.
 
 # Editor/hook scratch files.
 .claude/*.tmp.*
@@ -26,3 +47,22 @@ mlflow.db
 # Unpromoted experiment models. Large, binary, and superseded by the next run; the metrics JSON
 # beside them is the record worth keeping. Regenerate with training/train.py --embeddings ...
 artifacts/experimental/*.joblib
+
+# Subagent-driven-development scratch: ledgers, briefs, review packages.
+.superpowers/
+
+# LSMS-ISA microdata (Nigeria GHS-Panel). NEVER committed: the World Bank data-use agreement you
+# accept at download permits analysis, not redistribution, and a git remote is redistribution.
+# Re-obtain from https://microdata.worldbank.org/index.php/catalog/6410 (registration required).
+/data/lsms/
+
+# LSMS-derived analysis outputs. Same rule and same reason as /data/lsms/ above: these are
+# RECORD-LEVEL extracts (keyed on hhid, carrying ea/lga/state), not aggregates, so publishing them
+# to a git remote is redistribution just as publishing the raw CSVs would be. The scripts, the
+# aggregate *_summary.json and the FINDINGS write-ups ARE committed, so every number stays checkable
+# and every table regenerates by re-running against a re-downloaded copy of the microdata.
+experiments/E07-lsms/*.parquet
+experiments/E10-croploss/dataset.parquet
+# 3.4 MB of variable labels lifted verbatim out of the .dta files - survey documentation rather than
+# records, but a bulk verbatim copy of it all the same.
+experiments/E07-lsms/labels.json

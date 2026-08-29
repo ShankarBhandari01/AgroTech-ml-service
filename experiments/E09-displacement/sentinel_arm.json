@@ -1,0 +1,37 @@
+{
+  "seed": 20260829,
+  "radius_km": 5.0,
+  "draws": 4,
+  "sites": 22,
+  "paired_obs": 2512,
+  "requests": 118,
+  "cache_hits": 2,
+  "empty_true": 10,
+  "empty_disp": 25,
+  "aoi_km": [
+    1.11,
+    1.1
+  ],
+  "expected_aoi_overlap": 0.1054,
+  "zero_overlap_share": 0.7508,
+  "metrics": {
+    "ndvi": {
+      "n": 2502,
+      "raw_r": 0.4689,
+      "within_site_r": 0.4302,
+      "nrmse": 1.0761
+    },
+    "ndwi": {
+      "n": 2502,
+      "raw_r": 0.4414,
+      "within_site_r": 0.2775,
+      "nrmse": 1.1254
+    },
+    "evi": {
+      "n": 2502,
+      "raw_r": 0.0058,
+      "within_site_r": 0.0055,
+      "nrmse": 6.7102
+    }
+  }
+}

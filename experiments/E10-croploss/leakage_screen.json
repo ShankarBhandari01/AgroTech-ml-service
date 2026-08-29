@@ -1,0 +1,40 @@
+{
+ "banned_by_rule": {
+  "harvest-derived (circular)": [
+   "sa3iq9a",
+   "sa3iq9b",
+   "sa3iq9_conv",
+   "sa3iq10",
+   "sa3iq15a",
+   "yield_t_ha",
+   "harvest_kg",
+   "value_at_risk_usd",
+   "price_usd_per_t"
+  ],
+  "same-interview restatement": [
+   "s10q1a",
+   "s10q2a",
+   "s10q3a",
+   "s10q4a",
+   "s10q5a",
+   "s10q6a",
+   "s10q7a",
+   "s10q9a"
+  ],
+  "attributed cause of the label": [
+   "sa3iq7_1",
+   "sa3iq7_2",
+   "sa3iq12",
+   "sa3iq13_1",
+   "sa3iq13_2"
+  ],
+  "protected": [
+   "head_gender",
+   "household_max_education"
+  ]
+ },
+ "n_rows": 9376,
+ "loss_rate": 0.20819112627986347,
+ "n_ea": 359,
+ "n_households": 3142
+}
