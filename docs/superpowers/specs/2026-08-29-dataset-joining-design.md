@@ -164,6 +164,49 @@ Given that only 8 of 165 spatial cells cleared zero against ~4.1 expected by cha
 should be assumed underpowered for anything subtle: E08 must answer **one pre-registered question**,
 not sweep a matrix.
 
+### 4b. E09 has reported — the per-upstream predictions above were half wrong
+
+The table in 4a predicted weather would survive because displacement is "sub-pixel", and that
+optical and radar would both be "destroyed at pixel scale". Measured, at R = 5 km:
+
+| Upstream | Footprint | within-site retention | verdict |
+| --- | --- | --- | --- |
+| ERA5-Land weather | 68.5 km2 | 0.93–0.99 (heat_stress_days **0.34**) | survives, except the onset chain |
+| Sentinel-1 radar `vh` | 1.23 km2 | **0.843** | survives far better than predicted |
+| Sentinel-1 `vv` / `rvi` | 1.23 km2 | 0.796 / 0.677 | survives |
+| Sentinel-2 `ndvi` | 1.23 km2 | **0.435** | badly degraded |
+| Sentinel-2 `ndwi` | 1.23 km2 | 0.340 | badly degraded |
+
+**Correction 1 — weather does not survive because displacement is sub-pixel.** The grid is
+7.83 x 8.75 km, not the 0.25 deg / 28 km assumed, and **38.3% of draws change cell** (measured over
+4,880 draws). Weather survives because most of its features are smooth aggregates. The exception
+proves it: `heat_stress_days` collapses to **0.34**, because `season_onset_index` is a THRESHOLD
+detection whose flip cascades through phenology stage into the flowering window it gates.
+
+**Correction 2 — footprint does not govern the damage; spatial correlation length does.** Optical and
+radar share an identical 1.23 km2 AOI and an identical 75.1% zero-overlap geometry, yet retain 0.435
+and 0.843. Footprint cannot explain a gap that large. NDVI at 10 m reflects field-level MANAGEMENT --
+planting date, crop choice, inputs -- which decorrelates within a few hundred metres; C-band
+backscatter is driven by terrain, canopy structure and soil moisture, which are landscape-scale.
+This was verified against the obvious confound: `gap_days` is 0 for every pair in both modalities, so
+the two are matched on exact dates.
+
+**Correction 3 — 4a's acceptance gate is void.** It required "weather-only retention ~1.0 or reject
+the harness". That was written on the 28 km premise; `heat_stress_days` fails it and everything else
+passes. Replace it with the per-feature table above.
+
+**What this means for E08, stated before any LSMS file is acquired:**
+
+* **Viable at EA scale:** the drought sub-hazard (`water_satisfaction_30` 0.979, `dry_spell_30`
+  0.975 among moved draws) and the Sentinel-1 radar block. Build the EA panel on weather + radar.
+* **Not viable:** anything phenology-gated (`stage_kc`, `water_deficit_30`, heat-during-flowering),
+  and the optical canopy block at 0.435 with nRMSE ~1.0.
+* **The structural limit, which no feature choice fixes:** this project's measured skill rests on the
+  **field effect** -- 34.5% of variance, entirely WITHIN cluster, and E05 showed removing it removes
+  the temporal skill with it. A field effect is a per-field constant. A displaced coordinate points
+  at a DIFFERENT field, so it cannot carry that field's effect at all. E08 can therefore test
+  landscape-scale relationships; it cannot test the thing this repository has actually measured.
+
 **Step 7 — run the placebo first (E09).** The ceiling on all of the above is measurable *before*
 acquiring any LSMS file, by displacing the 122 known-coordinate sites with the same distribution and
 rebuilding features. See `docs/superpowers/plans/2026-08-29-E09-displacement-placebo.md`. **E09 gates
@@ -207,7 +250,7 @@ is the only available evidence for exposure and vulnerability, which today are u
 
 Weighted by measured impact, that is also where the value is: `expected_loss` swings ~$3,531 across a
 plausible exposure range against $450 for the full observed hazard range and $225 for vulnerability
-(notebook 05, §4). And §9.3 of `model-design.md` shows hazard is pinned at exactly 1.0 for 59.6% of
+(notebook 05, §4). And §9.3 of `model-design.md` showed hazard pinned at exactly 1.0 for 59.6% of
 the panel, so for most fields the ranking is already driven by exposure regardless.
 
 ---
