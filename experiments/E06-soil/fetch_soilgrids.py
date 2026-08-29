@@ -31,7 +31,7 @@ import requests
 
 REPO = Path(__file__).resolve().parents[2]
 CACHE_DIR = REPO / ".cache" / "soilgrids"
-SITES_CSV = Path("/tmp/e06_sites.csv")
+SITES_CSV = Path(__file__).parent / "sites.csv"
 
 URL = "https://rest.isric.org/soilgrids/v2.0/properties/query"
 # Split into a fast and a slow group (measured while probing: group A ~10s, group B ~20s per site
