@@ -1,0 +1,16 @@
+{
+ "n_crop_plot_rows": 8091,
+ "n_households": 3011,
+ "n_plots": 5135,
+ "ngn_per_usd_assumed": 1500.0,
+ "median_area_ha": 0.8400000035762787,
+ "median_value_at_risk_usd": 200.0,
+ "median_price_usd_per_t": 266.6666666666667,
+ "share_plots_intercropped": 0.6276109257199357,
+ "gps_to_selfreport_area_ratio": 0.887774992291694,
+ "trusted_crops": [
+  "1070. GUINEA CORN (SORGHUM)",
+  "1100. MILLET/MAIWA",
+  "1110. RICE"
+ ]
+}
