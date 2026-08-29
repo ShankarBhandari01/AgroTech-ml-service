@@ -32,6 +32,11 @@ mlflow.db
 # set with a third fewer samples; nothing could restore it. 468 KB, and it changes only on retrain.
 !/data/training_set.parquet
 
+# ...and the site covariates, tracked for the same reason: SoilGrids and the elevation grid are
+# both rate-limited/unreliable free APIs, so an untracked copy makes this file unreproducible on
+# demand. 122 rows, static, changes only when the covariate builder is re-run.
+!/data/site_covariates.parquet
+
 # The Presto embeddings stay ignored: 4.6 MB each, reproducible from .cache/, and the encoder was
 # evaluated and rejected (see artifacts/experimental/). Tracking them would cost 14 MB for a
 # negative result.
