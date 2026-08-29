@@ -946,6 +946,11 @@ component can pull the combined hazard back down.
 hazard saturates *more*, not less — noisy-OR is monotonic in its inputs (§4.5), so adding terms can
 only raise the combined value, never lower it.
 
+Measured rather than only argued: rerunning the same calculation with the notebook's real
+persistence-based vegetation term in place of 0 gives mean 0.749 and 59.68% saturated — the
+saturation share moves by 0.08 points. The pinning is driven by drought alone, and restoring the
+other hazard inputs does not relieve it.
+
 **The consequence.** `loss_rate = hazard × (0.5 + 0.5·v) × MAX_LOSS_FRACTION`, and the triage queue
 ranks by `expected_loss = exposure × loss_rate` (§4.5). Where hazard is pinned at 1.0, the ordering is
 driven entirely by **exposure** — `area × expected_yield × price` — which has no validation data
