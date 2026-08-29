@@ -50,3 +50,19 @@ artifacts/experimental/*.joblib
 
 # Subagent-driven-development scratch: ledgers, briefs, review packages.
 .superpowers/
+
+# LSMS-ISA microdata (Nigeria GHS-Panel). NEVER committed: the World Bank data-use agreement you
+# accept at download permits analysis, not redistribution, and a git remote is redistribution.
+# Re-obtain from https://microdata.worldbank.org/index.php/catalog/6410 (registration required).
+/data/lsms/
+
+# LSMS-derived analysis outputs. Same rule and same reason as /data/lsms/ above: these are
+# RECORD-LEVEL extracts (keyed on hhid, carrying ea/lga/state), not aggregates, so publishing them
+# to a git remote is redistribution just as publishing the raw CSVs would be. The scripts, the
+# aggregate *_summary.json and the FINDINGS write-ups ARE committed, so every number stays checkable
+# and every table regenerates by re-running against a re-downloaded copy of the microdata.
+experiments/E07-lsms/*.parquet
+experiments/E10-croploss/dataset.parquet
+# 3.4 MB of variable labels lifted verbatim out of the .dta files - survey documentation rather than
+# records, but a bulk verbatim copy of it all the same.
+experiments/E07-lsms/labels.json
