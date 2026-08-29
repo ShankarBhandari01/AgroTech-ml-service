@@ -88,6 +88,43 @@ def _severity_to_probabilities(hazard: float) -> PredictionProbabilities:
 FARMGATE_PRICE_USD_PER_T = {"maize": 250.0, "sorghum": 230.0, "rice": 420.0, "cassava": 120.0}
 DEFAULT_PRICE_USD_PER_T = 250.0
 
+# Per-crop yield baselines, measured on Nigeria GHS-Panel Wave 5 (`experiments/E07-lsms/`):
+# (median, p05, p95) t/ha over SOLE-CROPPED plots. Sole-cropped is the honest denominator -- 41.3%
+# of plots carry more than one crop, and dividing whole-plot area by each crop understates all of
+# them.
+#
+# These replace a single crop-blind constant. The previous fallback returned
+# `1.5 + (ndvi - 0.4) * 3.5` for every crop, which measured against this survey is 1.84x too high for
+# millet, 1.46x for maize, 1.38x for sorghum, and 0.67x too LOW for rice. One NDVI->yield line cannot
+# serve maize grain (0.80 t/ha) and cassava tubers (2.50 t/ha fresh weight) at once.
+#
+# This matters in proportion to E07's other finding: `yield` accounts for 42.4% of the variance in
+# `expected_loss` -- nearly double the entire hazard model's 22.5% -- so a 1.4-1.8x bias on Nigeria's
+# dominant cereals is not a rounding error in who gets an extension visit.
+#
+# CAVEAT, carried deliberately: GHS-Panel is a national survey sample, not this product's registered
+# farmers, and its yields validate against FAO only for some crops (rice 0.87x, sorghum 0.84x agree;
+# maize 0.44x, cassava 0.21x do not -- cassava is harvested piecemeal, so a post-harvest visit sees
+# harvest-to-date, not the season). These are better than a crop-blind 1.5 and are still a prior, not
+# a measurement of any real farmer. See experiments/E07-lsms/FINDINGS.md for the falsification test.
+YIELD_BASELINE_T_HA = {
+    "maize":   (0.80, 0.05, 7.50),      # n=875
+    "sorghum": (0.84, 0.12, 5.36),      # n=182
+    "rice":    (1.75, 0.20, 18.70),     # n=487
+    "cassava": (2.50, 0.13, 31.09),     # n=535
+    "millet":  (0.63, 0.13, 6.97),      # n=122
+    "cowpea":  (0.56, 0.03, 8.24),      # n=42
+}
+DEFAULT_YIELD_T_HA = (1.25, 0.09, 17.88)   # all sole-cropped plots, n=3013
+
+# NDVI sensitivity, expressed as a PROPORTION of the crop's baseline rather than an absolute t/ha.
+# 3.5 / 1.5 is exactly the old formula's relative slope, so with a 1.5 baseline this reproduces
+# `1.5 + (ndvi - 0.4) * 3.5` identically -- the change is a generalisation, not a new model. Absolute
+# sensitivity would be wrong across crops: a bump in greenness cannot add the same tonnage to millet
+# at 0.63 t/ha as to cassava at 2.50.
+YIELD_NDVI_SENSITIVITY = 3.5 / 1.5
+YIELD_NDVI_ANCHOR = 0.4
+
 
 def _leaf_wetness(lat: float, lon: float) -> list:
     """Per-day (mean temperature during the wet period, wet hours) from hourly Open-Meteo.
@@ -333,10 +370,18 @@ class PredictionsService:
             cumulative_dsv=dsv_total,
             heat_days=row["heat_stress_days"],
             vegetation=vegetation_hazard,
+            # Added after E07: pests (9.2% of households) and excess rain (10.6%) are among the
+            # most-reported agronomic shocks and had no term. Both upstreams were already in the
+            # feature row -- `fall_armyworm_generations` existed in domain.agronomy and was wired
+            # into nothing. `weed_pressure` is deliberately not passed: weeds are the LARGEST
+            # reported agronomic shock (15.7%) and no feed carries a weeding signal, so the term
+            # stays inert rather than contributing a constant. See notebooks/08-lsms-eda.ipynb.
+            gdd_since_onset=row.get("gdd_since_onset"),
+            rain_anomaly_mm=row.get("rain_anomaly_30"),
         )
         exposure = risk.assess_exposure(
             area_ha=self._parse_farm_size(farmer.farm_size),
-            expected_yield_t_ha=self._expected_yield(farmer, sat["ndvi"]),
+            expected_yield_t_ha=self._expected_yield(farmer, sat["ndvi"], crop),
             price_per_t=FARMGATE_PRICE_USD_PER_T.get(crop.lower(), DEFAULT_PRICE_USD_PER_T),
         )
         vulnerability = risk.assess_vulnerability(self._coping_signals(farmer))
@@ -436,11 +481,18 @@ class PredictionsService:
         return 1.0
 
     @staticmethod
-    def _expected_yield(farmer, ndvi: float) -> float:
-        """Reported yield when the survey has one; otherwise an NDVI-anchored estimate.
+    def _expected_yield(farmer, ndvi: float, crop: str | None = None) -> float:
+        """Reported yield when the survey has one; otherwise a per-crop NDVI-anchored estimate.
 
-        Explicitly a placeholder for the yield-anomaly regression in docs/model-design.md §4.4,
-        which needs a season of harvest records that do not exist yet.
+        Still a placeholder for the yield-anomaly regression in docs/model-design.md §4.4, which
+        needs a season of harvest records that do not exist yet — but a per-crop one. The baselines
+        come from GHS-Panel Wave 5 (`YIELD_BASELINE_T_HA`); the crop-blind 1.5 t/ha it replaces was
+        1.84x too high for millet and 0.67x too low for rice.
+
+        The NDVI term scales the crop's own baseline instead of adding an absolute tonnage, and the
+        clip is the crop's own observed [p05, p95] rather than a global [0.5, 5.0] — under the old
+        global ceiling no imputed value could ever reach the high-yield tail that root crops
+        actually occupy (cassava p95 is 31 t/ha fresh weight).
         """
         reported = getattr(farmer, "yield_value", None)
         # A zero yield is an unfilled survey field, not a farm that harvests nothing. Taken
@@ -448,7 +500,9 @@ class PredictionsService:
         # queue ranked by expected loss — the ranking inverts precisely for the farms that matter.
         if reported is not None and float(reported) > 0:
             return float(reported)
-        return round(max(0.5, min(5.0, 1.5 + (ndvi - 0.4) * 3.5)), 2)
+        base, lo, hi = YIELD_BASELINE_T_HA.get((crop or "").strip().lower(), DEFAULT_YIELD_T_HA)
+        estimate = base * (1.0 + YIELD_NDVI_SENSITIVITY * (ndvi - YIELD_NDVI_ANCHOR))
+        return round(max(lo, min(hi, estimate)), 2)
 
     @staticmethod
     def _coping_signals(farmer) -> dict:

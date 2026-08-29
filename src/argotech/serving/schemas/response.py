@@ -62,9 +62,30 @@ class VulnerabilityDetail(BaseModel):
 
 
 class RiskAssessmentDetail(BaseModel):
-    """Risk = Hazard x Exposure x Vulnerability, decomposed so the caller can act on the parts."""
-    risk_score: float
-    expected_loss_usd: float
+    """Risk = Hazard x Exposure x Vulnerability, decomposed so the caller can act on the parts.
+
+    **Which field a queue is ordered by is a policy decision with a measured equity consequence.**
+    On 3,011 Nigeria GHS-Panel households (docs/model-design.md 9.4), exposure and vulnerability
+    correlate at spearman **-0.410** -- poorer, less-equipped households farm smaller plots. So:
+
+      * ordering by `expected_loss_usd` gives spearman(rank, vulnerability) = **-0.289**: it puts
+        LESS vulnerable farmers first, because least coping capacity co-occurs with least value at
+        risk. It maximises value protected per visit.
+      * ordering by `risk_score` gives **+0.362**: it puts the most vulnerable first, on plots
+        holding roughly a fifth the value at risk. It maximises help to the worst-off.
+
+    The two orderings are near-disjoint -- 5 of 200 shared in the top 200. Neither is wrong; picking
+    one silently is. `prediction` / `priority_label` are derived from `risk_score` (exposure-free),
+    so a consumer that sorts on `expected_loss_usd` is overriding that choice, not refining it.
+    """
+    risk_score: float = Field(
+        description="Loss RATE on 0-100, exposure-free: hazard x (0.5 + 0.5*vulnerability). "
+                    "Comparable across farms of any size. Ordering by this favours the vulnerable.",
+    )
+    expected_loss_usd: float = Field(
+        description="Absolute expected loss = value_at_risk x loss_rate. Ordering by this favours "
+                    "larger farms; see the class docstring for the measured equity consequence.",
+    )
     value_at_risk_usd: float
     hazard: HazardDetail
     vulnerability: VulnerabilityDetail
