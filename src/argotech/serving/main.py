@@ -14,6 +14,7 @@ from argotech.config import settings
 from argotech.data.sentinel import sentinel_client
 from argotech.serving.api.crop_health import router as crop_health_router
 from argotech.serving.api.outcomes import router as outcomes_router
+from argotech.serving.api.precompute import router as precompute_router
 from argotech.serving.api.predict import router as predict_router
 
 logging.basicConfig(
@@ -59,6 +60,7 @@ async def log_requests(request: Request, call_next):
 app.include_router(predict_router)
 app.include_router(crop_health_router)
 app.include_router(outcomes_router)
+app.include_router(precompute_router)
 
 # The artifact itself is loaded lazily, on the first request that takes the model path; registry.py
 # logs which file and version it got. This says up front whether that will ever happen.

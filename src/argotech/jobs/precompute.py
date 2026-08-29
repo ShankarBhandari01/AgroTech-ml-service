@@ -34,12 +34,32 @@ DELAY_SECONDS = 1.5
 list_fields = backend_schema.list_fields
 
 
-async def run(limit: int | None = None, delay: float = DELAY_SECONDS) -> dict:
+async def run(limit: int | None = None, delay: float = DELAY_SECONDS,
+              fields: list[dict] | None = None) -> dict:
+    """
+    `fields`, when given, is used as-is instead of querying `list_fields` — this is what lets
+    `POST /precompute/batch` hand in a Kotlin-supplied field list without this job reading the
+    backend's schema. The crontab (`python -m argotech.jobs.precompute`, no batch caller) passes
+    nothing and keeps querying `list_fields`, unchanged.
+
+    An empty `fields` list (explicit `[]`, or `list_fields` finding nothing) is a no-op that
+    reports zero rather than an error.
+    """
     db = SessionLocal()
     try:
-        store.ensure_schema(db)
-        fields = list_fields(db, limit)
+        if fields is None:
+            # `ensure_schema` is single-instance DDL (see its docstring) — safe for the one nightly
+            # cron process, not for a batch call that a multi-replica API may run concurrently, so
+            # it only runs on the crontab path.
+            store.ensure_schema(db)
+            fields = list_fields(db, limit)
         print(f"Precomputing features for {len(fields)} fields ...")
+
+        if not fields:
+            summary = {"fields": 0, "ok": 0, "degraded": 0, "failed": 0, "pruned": 0,
+                       "degraded_rate": None}
+            print(f"Done: {summary}")
+            return summary
 
         # The peer reference is a fitted statistic carried in the artifact, so the nightly job needs
         # it too: a stored row whose `ndvi_z_peer` was standardised against anything else is the

@@ -57,6 +57,20 @@ class CoordinatesColdStartPredictionRequest(BaseModel):
     crop_type: str | None = "Maize"
     farm_size: float | None = 1.5
 
+# The same shape `data/backend_schema.py::list_fields` returns today — the contract is defined by
+# that query, not invented here. See `jobs/precompute.py::run` and the nightly-job-ownership plan:
+# this is what lets Kotlin hand in a field list instead of this service reading the backend's schema.
+class PrecomputeField(BaseModel):
+    field_id: str
+    latitude: float = Field(..., ge=-90, le=90)
+    longitude: float = Field(..., ge=-180, le=180)
+    crop: str
+
+
+class PrecomputeBatchRequest(BaseModel):
+    fields: list[PrecomputeField] = Field(default_factory=list)
+
+
 class OutcomeRequest(BaseModel):
     """What an agent, a diagnosis, or a harvest record observed for a field."""
     field_id: str
