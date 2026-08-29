@@ -914,6 +914,63 @@ invalid observations included.
 
 ---
 
+## 9.3 The drought term saturates for 60% of the panel, and a ranking cannot see past it
+
+Computed with the real `domain.risk.assess_hazard` over all 4,596 panel rows, with `cumulative_dsv=0`
+and `vegetation=0` because neither is retained in the panel (production derives DSV from a raw hourly
+series that is never stored; see §9's "not available in the panel" note on the same columns).
+Reproduced in `notebooks/05-risk-composition.ipynb`, §2.
+
+```
+combined hazard:  mean 0.686   median 1.000
+  share exactly 1.0                     : 59.6%
+  rows with water_satisfaction_30 <= 0.35: 58.7%
+  distinct hazard values in the top half : 1
+```
+
+**The hazard term cannot rank 60% of the panel.** Those rows all sit at exactly 1.0 — one value, no
+ordering.
+
+The mechanism, from `argotech/domain/risk.py:129-130`:
+
+```python
+drought = _clamp01((1.0 - water_satisfaction - 0.15) / 0.5)    # saturates at ws <= 0.35
+drought = max(drought, _clamp01((dry_spell_days - 7) / 14.0))  # or dry_spell >= 21
+```
+
+Two independent saturating paths, and `noisy_or` then pins the combined value at 1 — once any input
+to a noisy-OR is 1.0, the product `Π(1 − hᵢ)` is 0 regardless of the other terms, so no other
+component can pull the combined hazard back down.
+
+**This measurement is conservative.** Because DSV and vegetation are set to 0, the real production
+hazard saturates *more*, not less — noisy-OR is monotonic in its inputs (§4.5), so adding terms can
+only raise the combined value, never lower it.
+
+**The consequence.** `loss_rate = hazard × (0.5 + 0.5·v) × MAX_LOSS_FRACTION`, and the triage queue
+ranks by `expected_loss = exposure × loss_rate` (§4.5). Where hazard is pinned at 1.0, the ordering is
+driven entirely by **exposure** — `area × expected_yield × price` — which has no validation data
+anywhere in this repository (the panel has zero farmer/household columns). Notebook 05's own
+sensitivity analysis (§4 there) already quantifies this: `expected_loss` swings ~$3,531 across a
+plausible exposure range against $450 for the full observed hazard range and $225 for vulnerability.
+So for the majority of fields, **the queue's order is not determined by agronomic risk** — it is
+determined by farm size. Vulnerability also acquires an unintended role in the saturated rows: when
+hazard is pinned, the `(0.5 + 0.5·v)` modulation becomes the only thing still varying inside
+`loss_rate`.
+
+**This is a known failure mode in this codebase, not a new one.** `risk.py:41-42` already documents
+the same mechanism on the vegetation term — a hard ramp that assigned exactly 0.0 to 68% of fields
+and cost 23% of rank correlation under leave-one-cluster-out (rho 0.351 → 0.271) — and the fix there
+was a smooth, strictly-monotone mapping (`vegetation_hazard_from_anomaly`) instead of a threshold.
+Drought now shows a 59.6% tie rate by the same construction (a hard ramp against a fixed cut point)
+and has not had the same treatment.
+
+This section does not decide between a smooth mapping and a different threshold for drought — both
+are candidates by the vegetation precedent, and choosing between them is a product decision about
+what a hazard of 1.0 should mean (does drought stop getting worse at `water_satisfaction_30 = 0.35`,
+or does it keep ranking past that point?), not a modelling one.
+
+---
+
 ## 10. Serving architecture: batch features + audit trail
 
 Two changes that make the rest of the roadmap possible.
