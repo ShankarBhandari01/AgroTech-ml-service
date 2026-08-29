@@ -107,6 +107,68 @@ Socioeconomic Survey Data* (arXiv:2202.05220) before implementing it; the error 
 T1's window, but its geovariables are listed as *forthcoming*. Without them Wave 5 supports the
 non-spatial half (household attributes → exposure and vulnerability) and nothing spatial.
 
+### 4a. The EA aggregation, specified
+
+**Displacement is not uniform across upstreams.** It degrades each in proportion to that upstream's
+native resolution, so the EA panel is not uniformly damaged and the surviving features must be
+labelled as such:
+
+| Upstream | Native resolution | 0–5 km displacement is | Consequence |
+| --- | --- | --- | --- |
+| ERA5 (Open-Meteo archive) | 0.25° ≈ 28 km (ERA5-Land 0.1° ≈ 9 km) | **sub-pixel** | displaced point usually falls in the same grid cell; weather features survive nearly intact |
+| SoilGrids v2.0 | 250 m | 20× | aggregate over the support; soil varies smoothly, so the loss is modest |
+| Sentinel-2 L2A | 10–20 m, AOI ±500 m | 10× the half-width | destroyed at pixel scale |
+| Sentinel-1 GRD | 20 m | same | destroyed at pixel scale |
+
+The practical reading: the weather half of `assess_hazard` — which is what drives the drought,
+heat and disease sub-hazards — largely survives the move to EA scale. The canopy half does not.
+
+**Step 1 — the support.** Displacement is a uniform random direction with distance uniform in
+[0, R] (R = 5 km rural, 10 km for 1%; 2 km urban), **constrained to remain inside the survey's
+administrative unit**. So the support is not a disc:
+
+```
+support = disc(published_centroid, R) ∩ admin2_polygon
+```
+
+The intersection is load-bearing near a boundary, where it removes a large share of the naive disc.
+
+**Step 2 — the weighting is not uniform over area.** With `d ~ U(0,R)` and angle uniform, the joint
+density in polar coordinates is `1/(2πR)`, and the area element is `r dr dθ`, so the density **per
+unit area** is `1/(2πRr) ∝ 1/r`. Pixels must be weighted by `1/r` (capped as `r → 0`), not equally.
+A naive buffer mean over-weights the periphery, which is where most of the area lies. This step is
+what separates a defensible aggregate from a buffer average.
+
+**Step 3 — mask to cropland before averaging.** A 5 km disc contains towns, roads, water, bare
+ground and forest. A mean NDVI over it measures **land cover, not crop condition**. Mask to cropland
+(ESA WorldCover class 40 or equivalent) first. Omitting this is the most likely route to a
+confidently meaningless EA panel.
+
+**Step 4 — compute per pixel, then aggregate; never the reverse.** NDVI is a nonlinear ratio, so
+`mean(NDVI) ≠ NDVI(mean NIR, mean Red)` by Jensen's inequality, and the bias does not vanish with
+more pixels. The same holds for `water_satisfaction`. **Run-length statistics cannot be averaged at
+all:** `dry_spell_30` is the longest run below a threshold and is path-dependent — averaging the
+series first and then computing runs yields a systematically shorter spell than computing runs per
+cell and averaging. Moot for weather (sub-pixel), but binding for any downscaled product.
+
+**Step 5 — the temporal key changes meaning.** T1 is a 30-day-lead nowcast
+(`label_date = obs_date + 30d`). LSMS yields refer to a whole season. The EA panel is therefore not
+a re-slice of T1: features become season-integrated (cumulative rain, GDD sum, NDVI integral and
+peak, dry-spell count). For Wave 5 the season is bracketed by the post-planting visit (Jul–Sep 2023)
+and the yield recall at post-harvest (Jan–Mar 2024).
+
+**Step 6 — expect a power collapse.** ~5,000 households at roughly 10 per EA gives **n ≈ 500
+EA-seasons per wave**, against T1's 4,596 field-months — an order of magnitude fewer rows, and
+without the within-field variation that carries all measured skill. Block by EA and by state.
+Given that only 8 of 165 spatial cells cleared zero against ~4.1 expected by chance, this panel
+should be assumed underpowered for anything subtle: E08 must answer **one pre-registered question**,
+not sweep a matrix.
+
+**Step 7 — run the placebo first (E09).** The ceiling on all of the above is measurable *before*
+acquiring any LSMS file, by displacing the 122 known-coordinate sites with the same distribution and
+rebuilding features. See `docs/superpowers/plans/2026-08-29-E09-displacement-placebo.md`. **E09 gates
+E08:** if the known signal does not survive simulated displacement, E08 cannot work as designed.
+
 ---
 
 ## 5. Ordering, so joins do not reintroduce a leak
