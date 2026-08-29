@@ -32,7 +32,7 @@ for.** Measured (by the coordinator, prior to this task, and consistent with wha
 construction predicts): `max |pred(seed) - pred(seed=42)|` across seeds `{42, 7, 2024, 1, 99}` is
 exactly `0.000e+00` for **both** the linear and boosted arms on this cell.
 
-- `linear` (`argotech.lab.arms`) is a `Ridge` regression: a closed-form / deterministic convex
+- `linear` (`argotech.lab.arms.arms`) is a `Ridge` regression: a closed-form / deterministic convex
   solve. It has no stochastic component at all, at any seed. This is expected, not a bug.
 - `boosted` is `HistGradientBoostingRegressor` with `early_stopping=False`, set deliberately
   (see `arms.py` / E01-era review notes) to stop sklearn's IID internal validation split from
@@ -50,7 +50,7 @@ rules a seed sweep out rather than treating it as optional.
 ## Step 3 — the actual replication: a site-level bootstrap
 
 Per `docs/superpowers/plans/2026-08-26-close-out-and-retire-incumbent.md` Task E and this
-investigation's own `src/argotech/lab/variance.py` (which already bootstraps sites the same way
+investigation's own `src/argotech/lab/eval/variance.py` (which already bootstraps sites the same way
 to interval the site ICC): resample **sites**, never rows — the panel has 39 monthly observations
 per site on average, and treating those as 39 independent facts is exactly the mistake
 `variance.decompose`'s docstring already warns against.

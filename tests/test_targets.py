@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from argotech.lab.targets import TARGET_KINDS, alpha_hat, build_target
+from argotech.lab.estimand.targets import TARGET_KINDS, alpha_hat, build_target
 
 
 def _panel(n_sites: int = 4, n_obs: int = 10) -> pd.DataFrame:

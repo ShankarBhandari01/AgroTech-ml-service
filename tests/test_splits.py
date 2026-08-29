@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from argotech.lab.splits import forward_chaining, leave_one_cluster_out
+from argotech.lab.eval.splits import forward_chaining, leave_one_cluster_out
 
 
 def _df() -> pd.DataFrame:

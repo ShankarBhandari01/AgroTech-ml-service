@@ -1,6 +1,6 @@
 """Site-level bootstrap for E03 (Task E): replicate spatial/geo_month/within_xy.
 
-Follows the same resampling approach as argotech.lab.variance.decompose: resample SITES with
+Follows the same resampling approach as argotech.lab.eval.variance.decompose: resample SITES with
 replacement (never rows), relabel each draw "<site_id>#<i>" so alpha_hat/leave_one_cluster_out
 treat every draw as an independent pseudo-site, then rerun the full lab pipeline
 (run_experiment) on the resampled panel. Each replicate yields one net_benefit_mean per arm,

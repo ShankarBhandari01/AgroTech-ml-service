@@ -20,8 +20,9 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from argotech.lab.arms import ARMS, resid_sd
-from argotech.lab.evaluate import (
+from argotech.lab.arms.arms import ARMS, resid_sd
+from argotech.lab.estimand.peers import apply_peer_z, fit_peer_stats
+from argotech.lab.eval.evaluate import (
     DEFAULT_TAU,
     DEFAULT_THRESHOLDS,
     bootstrap_ci,
@@ -31,9 +32,8 @@ from argotech.lab.evaluate import (
     prob_event,
     spearman,
 )
-from argotech.lab.panel import manifest
-from argotech.lab.peers import apply_peer_z, fit_peer_stats
-from argotech.lab.splits import forward_chaining, leave_one_cluster_out
+from argotech.lab.eval.splits import forward_chaining, leave_one_cluster_out
+from argotech.lab.panel.panel import manifest
 
 SPLITS = {"spatial": leave_one_cluster_out, "temporal": forward_chaining}
 
@@ -47,7 +47,7 @@ def load_config(path) -> dict:
     cfg.setdefault("splits", ["spatial", "temporal"])
     # "leaky" reproduces the pre-fix behaviour (panel's whole-frame baked column) as the control
     # arm; "geo_month" is the default because it is the key that lets a held-out region borrow a
-    # reference at all (lab/peers.py) — cluster_month gives a held-out cluster none.
+    # reference at all (lab/estimand/peers.py) — cluster_month gives a held-out cluster none.
     cfg.setdefault("peer_key", "geo_month")
     cfg.setdefault("lat_band", 20.0)
     cfg.setdefault("elev_band", 1000.0)
@@ -55,8 +55,8 @@ def load_config(path) -> dict:
 
 
 def git_sha() -> str:
-    """Shared with `lab.export`, which writes provenance the same way — no cycle to avoid here,
-    unlike `lab.panel`'s own copy (it is imported *by* this module, so importing back would cycle)."""
+    """Shared with `lab.arms.export`, which writes provenance the same way — no cycle to avoid here,
+    unlike `lab.panel.panel`'s own copy (it is imported *by* this module, so importing back would cycle)."""
     try:
         return subprocess.run(["git", "rev-parse", "--short", "HEAD"],
                                capture_output=True, text=True, check=True).stdout.strip()
@@ -122,7 +122,7 @@ def _score_fold(cfg: dict, panel: pd.DataFrame, train_raw: pd.DataFrame, test_ra
 
     Returns (train_t, test_t, features, peer_coverage).
     """
-    from argotech.lab.targets import build_target  # local: keeps the import graph acyclic
+    from argotech.lab.estimand.targets import build_target  # local: keeps the import graph acyclic
 
     peer_key_kind = cfg["peer_key"]
     if peer_key_kind == "leaky":
@@ -158,7 +158,7 @@ def _score_fold(cfg: dict, panel: pd.DataFrame, train_raw: pd.DataFrame, test_ra
 
 def run_experiment(cfg: dict, df: pd.DataFrame) -> dict:
     """Every arm, every fold, every declared split. Returns folds and a summary with intervals."""
-    from argotech.lab.targets import build_target  # local: keeps the import graph acyclic
+    from argotech.lab.estimand.targets import build_target  # local: keeps the import graph acyclic
 
     unknown = [a for a in cfg["arms"] if a not in ARMS]
     if unknown:

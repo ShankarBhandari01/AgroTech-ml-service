@@ -149,13 +149,13 @@ def peer_stats(df, group: str = "cluster") -> dict:
     than from whatever sample it happens to hold. Plain lists rather than a DataFrame: this crosses
     a joblib boundary and then a `predict` hot path, and must not drag pandas into either.
 
-    Callers today: `lab.panel.py` and `lab.export.py` both call this over the whole frame —
+    Callers today: `lab.panel.panel` and `lab.arms.export` both call this over the whole frame —
     `panel.py` to bake in the `leaky` control column `lab.run` compares against, and `export.py` to
     snapshot the reference the shipped artifact serves from. `serving.pipeline` then reads that
     snapshot at inference, which is correct there: a live request is one row with no future to leak
     from. The lab's honest evaluation does not call this function over the whole frame at all —
-    `argotech.lab.peers.fit_peer_stats` mirrors its output shape but is fit on training rows only,
-    per fold, so a held-out cluster is never standardised against itself.
+    `argotech.lab.estimand.peers.fit_peer_stats` mirrors its output shape but is fit on training rows
+    only, per fold, so a held-out cluster is never standardised against itself.
     """
     keys = df[group].astype(str) + "|" + df["obs_date"].str.slice(5, 7)
     grouped = df.assign(_bucket=keys).groupby("_bucket")

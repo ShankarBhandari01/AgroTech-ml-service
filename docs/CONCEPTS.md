@@ -208,7 +208,7 @@ gets violated the first time someone adds a column.
 
 # Part 4 — The estimand (the research core)
 
-Implemented in `src/argotech/lab/targets.py` and `src/argotech/lab/peers.py`.
+Implemented in `src/argotech/lab/estimand/targets.py` and `src/argotech/lab/estimand/peers.py`.
 
 ### Peer standardisation — the label
 **Formula.** For field *i* at bucket *t*: `z_it = (NDVI_it − μ_{c(i),t}) / σ_{c(i),t}`, over other
@@ -236,7 +236,7 @@ Cluster ICC **0.0000**. Cohort-date ICC **0.0000**, confirming stage 1 works. A 
 expanding field mean reaches Spearman **+0.437** and out-of-sample R² **+0.199** against the fitted
 40-feature model's **+0.398**.
 **Warrant.** Measurement — `experiments/E01_variance_decomposition.out`, reproducible via
-`argotech.lab.variance`.
+`argotech.lab.eval.variance`.
 
 ### `alpha_hat` — the field-effect estimator
 **Formula.** `α̂_it = w · (1/n_j) Σ_{s<t} z_is` with `w = n_j / (n_j + shrink)`, over observations
@@ -291,7 +291,7 @@ shrinks the cohort sd. Overall sd barely moves (1.144 → 1.142).
 **Why the remaining tails must not be filtered.** A field genuinely at NDVI 0.9 in a cohort
 averaging 0.28 with sd 0.11 really is z = +5.6. That is an unusual field — which is precisely what a
 triage system exists to find. Deleting it would delete the signal.
-**What was actually changed** (`src/argotech/lab/panel.py`, commit `2d4a595`):
+**What was actually changed** (`src/argotech/lab/panel/panel.py`, commit `2d4a595`):
 - `MIN_VALID_NDVI = 0.0` — applied to both the cohort and the label observation. Physics, not a
   tuning knob: NDVI ≤ 0 means NIR ≤ Red, which no canopy produces.
 - `MIN_COHORT_SD = 0.005`, replacing a `1e-6` guard. Measured cohort sds run 0.07–0.33, so 0.005 sits
@@ -308,7 +308,7 @@ triage system exists to find. Deleting it would delete the signal.
 
 # Part 5 — Validation protocol
 
-Implemented in `src/argotech/lab/splits.py`.
+Implemented in `src/argotech/lab/eval/splits.py`.
 
 ### Spatially blocked CV — leave-one-cluster-out
 **Why.** Neighbouring fields share weather cells and satellite scenes, so a shuffled K-fold leaks and
@@ -351,7 +351,7 @@ Evolution 12:1620–1633. **[verified]**.
 
 # Part 6 — Metrics
 
-Implemented in `src/argotech/lab/evaluate.py`.
+Implemented in `src/argotech/lab/eval/evaluate.py`.
 
 ### Net benefit / decision curve analysis
 **Formula.** `NB(t) = TP/n − (FP/n) · (t / (1 − t))`
@@ -436,7 +436,7 @@ n ≈ 4,500.
 
 # Part 8 — Model arms
 
-Implemented in `src/argotech/lab/arms.py`. Every baseline is an arm rather than a special case,
+Implemented in `src/argotech/lab/arms/arms.py`. Every baseline is an arm rather than a special case,
 because the argument turns on comparing against them honestly.
 
 | Arm | What it is | Why it is here |

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from argotech.lab.peers import apply_peer_z, fit_peer_stats, peer_key
+from argotech.lab.estimand.peers import apply_peer_z, fit_peer_stats, peer_key
 
 
 def _df() -> pd.DataFrame:

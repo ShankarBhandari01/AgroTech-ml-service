@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from argotech.features.agronomic import CLUSTER_RELATIVE
-from argotech.lab.export import export_artifact, load_config
+from argotech.lab.arms.export import export_artifact, load_config
 
 FEATURES = ["rain_30", "gdd_90_cz", "ndvi"]
 

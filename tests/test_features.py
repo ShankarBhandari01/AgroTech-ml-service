@@ -211,7 +211,7 @@ def test_spearman_sign_and_degenerate_cases():
     Both are monotone-invariant and drop (rather than propagate) a NaN target; that much carries
     over unchanged.
     """
-    from argotech.lab.evaluate import spearman
+    from argotech.lab.eval.evaluate import spearman
 
     truth = np.array([-2.0, -1.0, 0.0, 1.0, 2.0])   # ztilde: -2.0 is the worst-off field
     perfect = truth.copy()                          # a perfect point-prediction of ztilde itself

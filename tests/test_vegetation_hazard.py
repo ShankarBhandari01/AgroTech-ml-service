@@ -15,7 +15,7 @@ from argotech.serving.pipeline import _severity_to_probabilities
 def test_the_severe_threshold_matches_the_label_it_mirrors():
     """risk.SEVERE_ANOMALY_Z restates training.dataset.SEVERE_Z because serving must not import the
     training package. Restated constants drift; this is what stops it silently."""
-    from argotech.lab.panel import SEVERE_Z
+    from argotech.lab.panel.panel import SEVERE_Z
 
     assert risk.SEVERE_ANOMALY_Z == SEVERE_Z
 

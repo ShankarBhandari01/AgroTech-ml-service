@@ -14,7 +14,7 @@ directory is left uncommitted — nothing here has been `git add`ed or committed
 ## Donor rows (anchor check)
 
 Donor rows = training rows sharing a bucket with *any* of the held-out cluster's own rows. Computed
-directly from `argotech.lab.peers.peer_key` and `argotech.lab.splits.leave_one_cluster_out`, no
+directly from `argotech.lab.estimand.peers.peer_key` and `argotech.lab.eval.splits.leave_one_cluster_out`, no
 model fit involved. Order: Benue, Kaduna, Kano, Kenya.
 
 | Band | Benue | Kaduna | Kano | Kenya |

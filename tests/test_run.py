@@ -137,8 +137,8 @@ def test_leaky_reproduces_the_pre_change_numbers():
     this test only exercised the spatial protocol, where every site sits wholly on one side of a
     LOCO fold, so it could not have caught that truncation.
     """
+    from argotech.lab.estimand.targets import build_target as _bt
     from argotech.lab.run import ARMS, SPLITS, _score_arm
-    from argotech.lab.targets import build_target as _bt
 
     df = _panel()
     cfg = {**CFG, "splits": ["spatial", "temporal"]}

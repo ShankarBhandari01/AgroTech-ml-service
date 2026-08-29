@@ -485,24 +485,24 @@ in operational clusters, run-to-run variance across seeds, and performance on fi
 
 The lab (`argotech/lab/`) replaces the retired `argotech.training` package. Building the model has
 two separate jobs: `lab.run` *evaluates* a candidate against honest, leakage-free folds; only
-`lab.export` writes the artifact `models/registry.py` loads and `serving/pipeline.py` runs, and it
+`lab.arms.export` writes the artifact `models/registry.py` loads and `serving/pipeline.py` runs, and it
 does that by fitting on the *whole* panel — deliberately, and documented as such in
-`lab/export.py`'s own docstring, since a shipped artifact scores one row at a time with no future to
+`lab/arms/export.py`'s own docstring, since a shipped artifact scores one row at a time with no future to
 leak from. See `docs/superpowers/specs/2026-08-26-two-way-demeaned-estimand-design.md` for why the
 two are split.
 
 ```bash
 pip install -e '.[lab]'
 
-python -m argotech.lab.panel --sites 32 --years 4                      # → data/training_set.parquet
-python -m argotech.lab.export experiments/export-production.yaml       # → artifacts/agronomic_risk.joblib
+python -m argotech.lab.panel.panel --sites 32 --years 4                # → data/training_set.parquet
+python -m argotech.lab.arms.export experiments/export-production.yaml # → artifacts/agronomic_risk.joblib
 ```
 
 The panel is built from real measurements only: ERA5 daily reanalysis over the 90 days *before* each
 prediction date, passed through `argotech.domain`, plus the Sentinel-2 canopy state. The label is the
 peer-standardised NDVI anomaly one 30-day interval *ahead* — a future satellite observation, so no
 feature can determine its own target. Leakage controls are documented at the top of
-`argotech/lab/panel.py`.
+`argotech/lab/panel/panel.py`.
 
 The builder also fetches **Sentinel-1 backscatter** (`.cache/sentinel_sar/`, keyed separately so it
 can be added without invalidating the optical cache). Radar sees through cloud, which is the point:
@@ -515,7 +515,7 @@ window off `date.today()`, so two builds made on different days are not a contro
 
 ```bash
 pip install -e '.[lab]'                     # adds torch + einops, training-only
-python -m argotech.lab.embed --data data/training_set.parquet \
+python -m argotech.lab.presto.embed --data data/training_set.parquet \
                              --out  data/presto_embeddings.parquet
 ```
 
@@ -546,12 +546,12 @@ if it starts returning 429 across the board, resume tomorrow — the cache prese
 chaining, **five** arms per fold (zero, persistence, climatology, linear, boosted), net benefit at
 every decision threshold, precision@25, Spearman's rho, and a bootstrap CI over folds for each.
 Results are written to the config's `.result.json`, alongside a provenance block (data manifest
-hash, git SHA, seed) so a cited number always names the run that produced it. `lab.export` prints no
+hash, git SHA, seed) so a cited number always names the run that produced it. `lab.arms.export` prints no
 evaluation at all — it only fits and writes the artifact; a candidate is evaluated with `lab.run`
 *before* it is exported, never after.
 
 **Cluster-relative features** — a within-cluster z-score twin for each regionally-signatured
-feature, appended in `features/agronomic.py` and available to both `lab.run` and `lab.export`. The
+feature, appended in `features/agronomic.py` and available to both `lab.run` and `lab.arms.export`. The
 label is already standardised against the peer cohort; these stop the inputs handing the model raw
 cluster identity. Label-free, so a held-out cluster normalising against its own statistics is not
 leakage — it is the mechanism.
@@ -657,7 +657,7 @@ Where the non-code artifacts live, and why:
 - `notebooks/` — **committed, never packaged.** Reads committed CSVs and the panel.
 - `data/` — **gitignored**, one parquet whitelisted. A derived CSV in git is a second source of
   truth that drifts.
-- `artifacts/` — the model bundle serving loads; produced only by `argotech.lab.export`.
+- `artifacts/` — the model bundle serving loads; produced only by `argotech.lab.arms.export`.
 
 ---
 

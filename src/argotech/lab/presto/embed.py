@@ -8,7 +8,7 @@ reason the upstream caches exist.
 Output is keyed on `(site_id, obs_date)` so a modelling script can merge it onto the sample frame
 without either file needing to know the other's row order.
 
-Run: `python -m argotech.lab.embed --data data/training_set.parquet`
+Run: `python -m argotech.lab.presto.embed --data data/training_set.parquet`
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from argotech.lab import embeddings as emb
-from argotech.lab.panel import bands_history, collect_site, sample_sites
+from argotech.lab.panel.panel import bands_history, collect_site, sample_sites
+from argotech.lab.presto import embeddings as emb
 
 EMBED_DIM = 128
 EMBED_PREFIX = "presto_"

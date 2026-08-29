@@ -60,7 +60,7 @@ bucket — 42 of 45 buckets span multiple years, `Benue_River_Basin|01` alone ru
 training row's peer cohort lay at or after the boundary (max 94.2%). Under leave-one-cluster-out the
 held-out cluster's bucket drew from exactly one cluster: itself.
 
-The peer reference is now fit per fold (`argotech.lab.peers`): training rows populate the fit, a
+The peer reference is now fit per fold (`argotech.lab.estimand.peers`): training rows populate the fit, a
 held-out row never contributes to its own standardisation, and a fold that cannot see a region
 records no reference for it rather than fabricating one — coverage of a held-out cluster is
 `[0.0, 0.0, 0.0, 0.0]` under an honest cluster-keyed fit. A geographic key built from latitude and
@@ -87,7 +87,7 @@ subsequent change then shipped exactly that defect again, under a commit message
 cutting training on `obs_date < boundary` gives 121 rows whose outcome postdates the first test
 prediction, against zero under the fix. Three baselines are recomputed per fold: majority class,
 persistence, and site climatology. The peer reference the label and features depend on is now fit
-per fold rather than over the whole frame (`argotech.lab.peers`), under three keys — `leaky`, the
+per fold rather than over the whole frame (`argotech.lab.estimand.peers`), under three keys — `leaky`, the
 whole-frame control; `cluster_month`; and `geo_month`, latitude-and-elevation bands. Results below use
 `level_z`, the only target that supports comparing across keys: `within_y`, `within_xy` and `delta_z`
 are defined *through* `ndvi_z_peer`, so changing the key changes the target, not just the estimator.
@@ -148,7 +148,7 @@ Every number above was computed on the panel exactly as committed, and that pane
 233 rows (5.07%) with physically invalid NDVI (NDVI < 0, i.e. NIR ≤ Red — water, cloud, shadow or
 snow, never vegetation), which drives `forward_z`'s tail: rows with |z| > 3 are 8× enriched for a
 negative label-date NDVI. A fix at the source (`MIN_VALID_NDVI = 0.0`, `MIN_COHORT_SD = 0.005`,
-replacing a `1e-6` guard) landed in `argotech/lab/panel.py`, but **the panel was deliberately not
+replacing a `1e-6` guard) landed in `argotech/lab/panel/panel.py`, but **the panel was deliberately not
 rebuilt**: the meteo cache is keyed on `date.today()` and the committed panel was assembled across at
 least five distinct fetch windows, so a rebuild today would both invalidate 38 committed result files
 pinned to the current `content_hash` and confound the NDVI fix with a change in weather data. Stated

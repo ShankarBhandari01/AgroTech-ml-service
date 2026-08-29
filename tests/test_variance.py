@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from argotech.lab.variance import decompose, icc
+from argotech.lab.eval.variance import decompose, icc
 
 
 def _planted(icc_true: float, n_groups: int = 60, n_obs: int = 20, seed: int = 0):

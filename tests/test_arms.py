@@ -12,8 +12,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from argotech.lab.arms import ARMS, resid_sd
-from argotech.lab.targets import build_target
+from argotech.lab.arms.arms import ARMS, resid_sd
+from argotech.lab.estimand.targets import build_target
 
 FEATS = ["ndvi_z_peer", "rain_30"]
 

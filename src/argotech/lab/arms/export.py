@@ -12,7 +12,7 @@ one row with no future to leak from" — the same is true of `cluster_stats`, an
 below. This module is the one place in `lab/` where a whole-frame fit is the honest choice, not the
 leak the rest of the package exists to close.
 
-Run: `python -m argotech.lab.export experiments/export-production.yaml`
+Run: `python -m argotech.lab.arms.export experiments/export-production.yaml`
 """
 
 from __future__ import annotations
@@ -36,8 +36,8 @@ from argotech.features.agronomic import (
     cluster_stats,
     peer_stats,
 )
-from argotech.lab.arms import ARMS, Sklearn
-from argotech.lab.panel import CLUSTERS, manifest
+from argotech.lab.arms.arms import ARMS, Sklearn
+from argotech.lab.panel.panel import CLUSTERS, manifest
 from argotech.lab.run import git_dirty, git_sha
 
 PRODUCTION_ARTIFACT = Path(settings.AGRONOMIC_MODEL_PATH)

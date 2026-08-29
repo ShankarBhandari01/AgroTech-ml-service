@@ -825,12 +825,12 @@ That choice belongs to whoever owns the latency budget.
 their warrants: `docs/CONCEPTS.md` Part 4. In order: `alpha_hat`'s own guard test was blind to a
 same-row leak; the temporal split cut training on the prediction date instead of the label date
 (§9/§9.1's forward-chaining folds inherited this, and a later commit re-shipped the same defect under
-a message claiming to fix it — it is corrected now, in `argotech.lab.splits.forward_chaining`); and
+a message claiming to fix it — it is corrected now, in `argotech.lab.eval.splits.forward_chaining`); and
 the peer reference behind `ndvi_z_peer`, which both the label variants and the persistence baseline
 depend on, was fitted over the whole frame — 42 of 45 `cluster|MM` buckets span multiple years, and
 under leave-one-cluster-out a held-out cluster's own bucket was fit from itself.
 
-`argotech.lab.peers` now fits three keys per fold: `leaky` (the old whole-frame column, kept as a
+`argotech.lab.estimand.peers` now fits three keys per fold: `leaky` (the old whole-frame column, kept as a
 control), `cluster_month`, and `geo_month` (fixed latitude/elevation bands, never quantiles fit over
 the frame). The consequence is itself a finding: an honest `cluster_month` fit gives a held-out
 cluster **no reference at all** — coverage `[0.0, 0.0, 0.0, 0.0]`. `geo_month` restores coverage to
@@ -905,7 +905,7 @@ effect produces.
 The panel these results were computed on (`content_hash 6c832dc2…`) contains 233 rows (5.07%) with
 physically invalid NDVI (NDVI < 0 — water, cloud, shadow or snow, never vegetation), which drives
 `forward_z`'s extreme tail: rows with `|z| > 3` are 8× enriched for a negative label-date NDVI. The
-fix (`MIN_VALID_NDVI = 0.0`, `MIN_COHORT_SD = 0.005`) landed in `argotech.lab.panel`, but the panel
+fix (`MIN_VALID_NDVI = 0.0`, `MIN_COHORT_SD = 0.005`) landed in `argotech.lab.panel.panel`, but the panel
 was **deliberately not rebuilt**: the meteo cache is keyed on `date.today()` and the committed panel
 spans at least five distinct fetch windows, so a rebuild today would both invalidate 38 committed
 result files pinned to the current `content_hash` and confound the NDVI fix with a change in weather
@@ -968,24 +968,24 @@ exist, predictions still serve and the write is logged and skipped.
   permutation importance on held-out ground, ECE, precision@k). Results in §9. `argotech.training` is
   now retired — see below.
 - **`argotech.lab` replaces `argotech.training`.** `training/train.py` (684 lines) and its
-  `__init__.py` are deleted; `dataset.py` moved to `argotech/lab/panel.py` and `embed.py` to
-  `argotech/lab/embed.py`, both by `git mv` (history preserved across the pre-move commits).
-  `argotech/lab/export.py` is now the sole producer of `artifacts/agronomic_risk.joblib`, proven
+  `__init__.py` are deleted; `dataset.py` moved to `argotech/lab/panel/panel.py` and `embed.py` to
+  `argotech/lab/presto/embed.py`, both by `git mv` (history preserved across the pre-move commits).
+  `argotech/lab/arms/export.py` is now the sole producer of `artifacts/agronomic_risk.joblib`, proven
   end-to-end before `train.py` was deleted: exported to a scratch path, loaded through
   `argotech/models/registry.py`'s `ModelManager`, passed the contract check, and `model.predict`
   succeeded on the exact DataFrame shape `serving/pipeline.py` builds. The production artifact itself
   is unchanged by any of this — an empty diff across the session.
-- **`argotech/lab/peers.py`** fits the peer reference behind `ndvi_z_peer`/`rvi_z_peer` on training
+- **`argotech/lab/estimand/peers.py`** fits the peer reference behind `ndvi_z_peer`/`rvi_z_peer` on training
   rows only, per fold, under three keys — `leaky` (whole-frame control), `cluster_month`, and
   `geo_month` (latitude/elevation bands) — closing the leak where the old whole-frame fit let a
-  held-out cluster's bucket draw from itself. `argotech/lab/export.py` remains the one place that
+  held-out cluster's bucket draw from itself. `argotech/lab/arms/export.py` remains the one place that
   fits on the whole panel, deliberately: a shipped artifact runs at inference time, where there is no
   future to leak from. Results and the multiple-comparisons argument governing them: §9.2.
-- **`argotech/lab/splits.py`** corrects the temporal split to purged/embargoed forward chaining —
+- **`argotech/lab/eval/splits.py`** corrects the temporal split to purged/embargoed forward chaining —
   training takes `label_date < boundary`, test takes `obs_date >= boundary`, rows satisfying neither
   are embargoed — replacing a cut on the prediction date that left the last month of training
   outcomes known after the first test predictions were made. See §9.2.
-- **`argotech/lab/panel.py`** enforces NDVI validity (`MIN_VALID_NDVI = 0.0`, `MIN_COHORT_SD =
+- **`argotech/lab/panel/panel.py`** enforces NDVI validity (`MIN_VALID_NDVI = 0.0`, `MIN_COHORT_SD =
   0.005`) and fixes a peer-exclusion bug — peers were excluded by NDVI value rather than site
   identity, silently dropping and biasing cohorts. The fix applies to future rebuilds only; the
   committed panel was deliberately not rebuilt (§9.2, `docs/FACTS.md` §7.8–7.9).

@@ -25,7 +25,7 @@ Leakage control
   interval — so it needs no historical baseline that could carry future information.
 * The rainfall climatology used for `rain_anomaly_30` excludes the sample's own year.
 
-Run: `python -m argotech.lab.panel --sites 30 --years 4`
+Run: `python -m argotech.lab.panel.panel --sites 30 --years 4`
 """
 
 from __future__ import annotations

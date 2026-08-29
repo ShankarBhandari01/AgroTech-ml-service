@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from argotech.lab.evaluate import (
+from argotech.lab.eval.evaluate import (
     bootstrap_ci,
     decision_curve,
     net_benefit,

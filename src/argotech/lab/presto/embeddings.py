@@ -56,7 +56,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from argotech.lab._presto_vendored import Presto
+from argotech.lab.presto._presto_vendored import Presto
 
 # Channel layout, mirrored from the vendored `BANDS_GROUPS_IDX`. Duplicated as explicit names
 # because an off-by-one here is invisible: every index is a valid float slot.

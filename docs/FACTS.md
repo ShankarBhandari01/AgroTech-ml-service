@@ -601,7 +601,7 @@ recorded as such.
 
 Panel throughout this section: `data/training_set.parquet`, 4,596 rows, 122 sites, 4 clusters,
 2022-09-10 .. 2026-06-21, `content_hash` `6c832dc2741766af8a74b5fd2dd39cab4d4557fdba811ecc728a8a6b8bf28aeb`
-(hashed and recorded by `build_dataset`, `src/argotech/lab/panel.py:400`). Concepts and formulas are
+(hashed and recorded by `build_dataset`, `src/argotech/lab/panel/panel.py:400`). Concepts and formulas are
 defined once, in `docs/CONCEPTS.md` Part 4; this section is the citation trail behind that document's
 claims, not a restatement of them.
 
@@ -610,7 +610,7 @@ claims, not a restatement of them.
 `forward_z` decomposes as a time-invariant field effect plus a cohort-date effect plus residual;
 stage-1 peer standardisation removes the date effect, nothing removed the field effect. Measured
 (`experiments/E01_variance_decomposition.out`, reproducible via `decompose()`,
-`src/argotech/lab/variance.py:39`, using the unbiased one-way random-effects `icc()` at
+`src/argotech/lab/eval/variance.py:39`, using the unbiased one-way random-effects `icc()` at
 `variance.py:16`): field-effect ICC **0.345**, 95% CI **[0.2357, 0.4353]** over 1,000 site
 bootstraps; cluster ICC 0.0000; cohort-date ICC 0.0000 (mean +0.0014), confirming stage 1 works.
 Naive eta-squared reports 0.360 on the same data — it credits groups with their own sampling noise,
@@ -623,7 +623,7 @@ effect is the majority share" criterion, which failed (34.5% is not a majority).
 ### 7.2 Three leaks, found and fixed
 
 **(a) Same-row leak in a test, not the code.** `alpha_hat`'s own guard test spiked only each site's
-*last* row, so deleting `.shift(1)` at `src/argotech/lab/targets.py:54` — a genuine same-row leak —
+*last* row, so deleting `.shift(1)` at `src/argotech/lab/estimand/targets.py:54` — a genuine same-row leak —
 passed all 11 existing tests. Fixed by `test_alpha_hat_excludes_the_current_rows_own_value`
 (`tests/test_targets.py:40`), verified to fail if `.shift(1)` is reverted to `.shift(0)`.
 
@@ -634,7 +634,7 @@ claiming to fix it. Measured on the committed panel: the `obs_date`/`label_date`
 days on all 4,596 rows; cutting `train = df[df.obs_date < boundary]` gives 2,931 rows of which
 **121** have `label_date >= boundary` — an outcome that postdates the first test prediction; cutting
 `train = df[df.label_date < boundary]` gives 2,810 rows with **zero**. Fixed in
-`forward_chaining()`, `src/argotech/lab/splits.py:31-49`: train takes `label_date < boundary`, test
+`forward_chaining()`, `src/argotech/lab/eval/splits.py:31-49`: train takes `label_date < boundary`, test
 takes `obs_date >= boundary`, rows satisfying neither are embargoed (52/31/69 rows per fold across
 the three boundaries) — purged/embargoed forward chaining.
 
@@ -645,7 +645,7 @@ during evaluation"; no caller in `argotech.training` ever did. Measured: the buc
 (`Benue_River_Basin|01` runs 2023-01-08 .. 2026-01-22). Across the three forward-chaining
 boundaries, **74.0% / 49.9% / 24.3%** of a training row's peer cohort lay at or after the boundary
 (max 94.2%). Under leave-one-cluster-out the held-out cluster's bucket drew from exactly one
-cluster: itself. Fixed by `src/argotech/lab/peers.py`: `peer_key()` (`:30`) computes the bucket for
+cluster: itself. Fixed by `src/argotech/lab/estimand/peers.py`: `peer_key()` (`:30`) computes the bucket for
 three kinds — `leaky` (the panel's whole-frame baked column, kept as a control), `cluster_month`
 (`<cluster>|<MM>`), and `geo_month` (`<lat_band>_<elev_band>|<MM>`, fixed cut points, never
 quantiles fit over the frame); `fit_peer_stats()` (`:47`) fits on training rows only;
@@ -662,7 +662,7 @@ the prior implementation's `prior_mean.fillna(0.0)` combined with a `prior_n` th
 regardless of NaN yielded exactly `alpha_hat = 0.0`, so `ztilde = forward_z - 0.0 = forward_z`
 exactly. Measured on the real Benue fold: peer coverage 0.000, `alpha_hat` unique value `[0.]`,
 `ztilde == forward_z` exactly. Every `within_*` × `cluster_month` cell was therefore a `level_z`
-result reported under a `within` label. Fixed at `src/argotech/lab/targets.py:48`: only non-NaN
+result reported under a `within` label. Fixed at `src/argotech/lab/estimand/targets.py:48`: only non-NaN
 priors are counted, the `fillna` is removed, and a NaN `prior_mean` propagates to a NaN `alpha_hat`
 rather than being fabricated as zero.
 
@@ -703,7 +703,7 @@ Per-fold decomposition of the +0.0404 headline:
 
 **Two of four folds are negative.** The mean is carried by Benue at roughly 3× the headline effect;
 the fold spread (-0.0103 .. +0.1268, range 0.137) is more than 3× the reported effect. Maximum
-attainable net benefit *is* the event rate (`net_benefit()`, `src/argotech/lab/evaluate.py:44`), so
+attainable net benefit *is* the event rate (`net_benefit()`, `src/argotech/lab/eval/evaluate.py:44`), so
 folds are not on a common scale — Benue's ceiling (0.488) is ten times Kano's (0.049), and the fold
 carrying the mean is the fold with the most room to score.
 
@@ -713,7 +713,7 @@ solve; `boosted` runs with `early_stopping=False` (set to stop sklearn's interna
 split from leaking across the spatial blocking), which removed its only stochastic component — five
 seeds would return five identical numbers.
 
-Site-level bootstrap (`bootstrap_ci()`, `src/argotech/lab/evaluate.py:104`; script
+Site-level bootstrap (`bootstrap_ci()`, `src/argotech/lab/eval/evaluate.py:104`; script
 `experiments/E03-replication/bootstrap_sites.py`), 200/200 replicates, `boot_seed = 20260826`:
 `linear` +0.0404, CI **[-0.0026, +0.0781]**, P(NB>0)=0.950; `boosted` +0.0218, CI
 [-0.0016, +0.0424], P(NB>0)=0.950. That interval (width 0.0808) is *narrower* than the fold-level one
@@ -776,9 +776,9 @@ what a triage system exists to find.
 A second, independent bug at the same site: peers were excluded by *value*
 (`v != label_obs["ndvi"]`), so any peer whose NDVI happened to equal the field's own was silently
 dropped, shrinking and biasing the cohort. Fixed to exclude by site identity —
-`src/argotech/lab/panel.py:326-327` now reads `if site_id != s["site_id"]`.
+`src/argotech/lab/panel/panel.py:326-327` now reads `if site_id != s["site_id"]`.
 
-**What was changed** (`src/argotech/lab/panel.py`, commit `2d4a595`):
+**What was changed** (`src/argotech/lab/panel/panel.py`, commit `2d4a595`):
 
 | Constant | Value | Was | Where | Why |
 | --- | --- | --- | --- | --- |
@@ -790,7 +790,7 @@ dropped, shrinking and biasing the cohort. Fixed to exclude by site identity —
 ### 7.9 Why the panel was not rebuilt
 
 The Sentinel and SAR caches are keyed `{site_id}-{days}` — date-independent, reusable across a
-rebuild (`src/argotech/lab/panel.py:143`, `:153`). The meteo cache is keyed
+rebuild (`src/argotech/lab/panel/panel.py:143`, `:153`). The meteo cache is keyed
 `{lat},{lon},{start},{end}`, both dates derived from `date.today()`. The committed cache holds at
 least **five** distinct windows: 2022-05-03/04/08/14 → 2026-08-04/05/09/15 — so the committed panel
 was assembled across several days, and sites do not share a common weather window, which matters
@@ -810,12 +810,12 @@ the invalid NDVI observations described in §7.8.** The validity fix applies to 
 
 `argotech.training` is gone (commit `e8f7f4d`, "Export the artifact from the lab, then retire
 argotech.training"): `train.py` (684 lines) and `__init__.py` were deleted; `embed.py` moved to
-`argotech.lab.embed` and `dataset.py` moved to `argotech.lab.panel` by `git mv` (commit `d80bb40`,
+`argotech.lab.presto.embed` and `dataset.py` moved to `argotech.lab.panel.panel` by `git mv` (commit `d80bb40`,
 "Move the panel builder into the lab and fingerprint what it emits"; history preserved across 9
 pre-move commits).
 
 `argotech.training.train` was the sole producer of `artifacts/agronomic_risk.joblib`.
-`src/argotech/lab/export.py` (`export_artifact()`, `:62`) replaces it, and was proven end-to-end
+`src/argotech/lab/arms/export.py` (`export_artifact()`, `:62`) replaces it, and was proven end-to-end
 before the deletion: exported to a scratch path, loaded through `src/argotech/models/registry.py`'s
 `ModelManager`, passed the contract check, and `model.predict` succeeded on the exact DataFrame shape
 `serving/pipeline.py` builds. The production artifact itself was not modified — an empty diff across

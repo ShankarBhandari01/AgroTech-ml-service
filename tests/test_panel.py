@@ -12,8 +12,8 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from argotech.lab import panel as panel_mod
-from argotech.lab.panel import build_samples, manifest, write_panel
+from argotech.lab.panel import panel as panel_mod
+from argotech.lab.panel.panel import build_samples, manifest, write_panel
 
 
 def _df() -> pd.DataFrame:

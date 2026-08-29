@@ -37,8 +37,8 @@ class ModelManager:
             if not os.path.exists(path):
                 raise FileNotFoundError(
                     f"Agronomic model '{path}' not found. Build it with "
-                    "`python -m argotech.lab.panel` then "
-                    "`python -m argotech.lab.export experiments/export-production.yaml`.")
+                    "`python -m argotech.lab.panel.panel` then "
+                    "`python -m argotech.lab.arms.export experiments/export-production.yaml`.")
             bundle = joblib.load(path)
             target = bundle.get("target")
             if target != "forward_z":
@@ -47,8 +47,8 @@ class ModelManager:
                     "This is refused rather than adapted to: a classifier's `.predict()` returns "
                     "class labels 0/1/2, which the hazard map reads as near-zero anomalies, so "
                     "every field would silently report almost no canopy hazard. Retrain with "
-                    "`python -m argotech.lab.panel` then "
-                    "`python -m argotech.lab.export experiments/export-production.yaml`."
+                    "`python -m argotech.lab.panel.panel` then "
+                    "`python -m argotech.lab.arms.export experiments/export-production.yaml`."
                 )
             if not bundle.get("peer_stats"):
                 raise ValueError(

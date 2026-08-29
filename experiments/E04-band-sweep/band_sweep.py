@@ -34,9 +34,9 @@ import pandas as pd  # noqa: E402
 import yaml  # noqa: E402
 
 sys.path.insert(0, "src")
-from argotech.lab.peers import peer_key  # noqa: E402
+from argotech.lab.estimand.peers import peer_key  # noqa: E402
 from argotech.lab.run import load_config, run_experiment  # noqa: E402
-from argotech.lab.splits import leave_one_cluster_out  # noqa: E402
+from argotech.lab.eval.splits import leave_one_cluster_out  # noqa: E402
 
 HERE = Path(__file__).parent
 REPO = HERE.parent.parent
