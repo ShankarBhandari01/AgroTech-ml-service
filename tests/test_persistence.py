@@ -188,6 +188,63 @@ def test_label_join_ignores_an_outcome_that_precedes_its_prediction(db):
     assert joined == [], "an outcome before the prediction must not be joined to it"
 
 
+def test_an_unlinked_outcome_produces_ONE_label_not_one_per_prediction(db):
+    """The fan-out. Every other test here writes a single prediction per field, so none of them can
+    see this: the nightly precompute writes a prediction per field per DAY, and an agent report that
+    carries no `prediction_id` falls inside the horizon of every one of them.
+
+    Unfixed, one field visit becomes N labels of the same observation. That corrupts two things at
+    once. `GET /outcomes/label-count` is the number that decides when phase 3 starts, and it would
+    read 30x high. And a training set built from this query would carry 30 near-identical rows for
+    one real fact -- the same error this repository already names elsewhere as "39 monthly
+    observations of one site are not 39 independent facts", arriving in a new place.
+
+    An observation is one label. Which prediction it scores is a real question, and the answer is
+    the most recent forecast standing when the agent looked.
+    """
+    field_id = f"test-{uuid.uuid4()}"
+    base = datetime.utcnow() - timedelta(days=10)
+    pids = [store.write_prediction(db, field_id, "agro-test", "live",
+                                   {"ndvi": 0.4}, _assessment(), None) for _ in range(5)]
+    # Space the predictions a day apart, as the nightly job would.
+    for i, pid in enumerate(pids):
+        db.execute(text("UPDATE predictions SET predicted_at = :t WHERE id = :i"),
+                   {"t": base + timedelta(days=i), "i": pid})
+    db.commit()
+
+    store.write_outcome(db, field_id, base + timedelta(days=6), "agent_visit",
+                        prediction_id=None, stress_confirmed=True)
+
+    joined = [r for r in store.label_join(db, horizon_days=30) if r["field_id"] == field_id]
+    assert len(joined) == 1, (
+        f"one visit produced {len(joined)} labels, one per prediction still inside the horizon")
+    assert joined[0]["id"] == pids[-1], (
+        "the label should score the most recent forecast standing when the agent looked")
+
+
+def test_an_explicit_link_still_wins_over_the_nearest_prediction(db):
+    """The de-duplication above must not quietly override an agent who said which forecast they were
+    checking. An explicit `prediction_id` is ground truth; only unlinked reports get resolved by
+    recency, and picking the newest prediction for a linked report would silently relabel it.
+    """
+    field_id = f"test-{uuid.uuid4()}"
+    base = datetime.utcnow() - timedelta(days=10)
+    pids = [store.write_prediction(db, field_id, "agro-test", "live",
+                                   {"ndvi": 0.4}, _assessment(), None) for _ in range(3)]
+    for i, pid in enumerate(pids):
+        db.execute(text("UPDATE predictions SET predicted_at = :t WHERE id = :i"),
+                   {"t": base + timedelta(days=i), "i": pid})
+    db.commit()
+
+    # The agent names the OLDEST prediction, not the newest.
+    store.write_outcome(db, field_id, base + timedelta(days=6), "agent_visit",
+                        prediction_id=pids[0], stress_confirmed=True)
+
+    joined = [r for r in store.label_join(db, horizon_days=30) if r["field_id"] == field_id]
+    assert len(joined) == 1
+    assert joined[0]["id"] == pids[0], "an explicit prediction_id must not be overridden by recency"
+
+
 def test_the_label_count_is_the_number_that_gates_phase_three(db):
     """`label_join` returning few rows is the honest state of the feedback loop, not a bug.
 

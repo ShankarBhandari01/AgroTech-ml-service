@@ -233,21 +233,44 @@ def label_join(db: Session, horizon_days: int = 30) -> list[dict]:
 
     The training query for phase 3. It returns nothing today, and that is the point: it is the
     query whose row count tells you when supervised modelling on real outcomes becomes possible.
+
+    **One outcome yields at most one row, enforced by `DISTINCT ON (o.id)`.** Without it the window
+    branch fans out: `jobs/precompute` writes a prediction per field per DAY, so an agent report
+    carrying no `prediction_id` falls inside the horizon of every prediction in the preceding 30 and
+    joins to all of them. Measured on five daily predictions, one visit produced **five** labels.
+
+    That corrupts two things at once. `GET /outcomes/label-count` is the number that decides when
+    phase 3 can start, and it would read up to 30x high — the feedback loop would look closed long
+    before it was. And a training set built from this query would carry 30 near-identical rows for
+    one real fact, which is the error this repository already names as "39 monthly observations of
+    one site are not 39 independent facts", arriving somewhere new.
+
+    Which prediction an unlinked report scores is a real question, not a tie to break arbitrarily.
+    The answer is the most recent forecast standing when the agent looked (`predicted_at DESC`):
+    that is the advisory in force at the time of the visit. An explicit `prediction_id` still wins
+    outright — it matches only the first branch, so recency never overrides an agent who said which
+    forecast they were checking.
     """
     rows = db.execute(text("""
-        SELECT p.id, p.field_id, p.predicted_at, p.model_version, p.features, p.risk_score,
-               p.severity, o.outcome_type, o.stress_confirmed, o.diagnosis, o.yield_t_ha,
-               o.observed_at
-        FROM predictions p
-        JOIN field_outcomes o
-          -- An explicit prediction_id always wins: when an agent says which forecast they were
-          -- checking, that link is ground truth and must not be second-guessed by a time window.
-          -- The window only rescues unlinked reports (a spontaneous field visit, an SMS).
-          ON o.prediction_id = p.id
-          OR (o.prediction_id IS NULL
-              AND o.field_id = p.field_id
-              AND o.observed_at BETWEEN p.predicted_at
-                                   AND p.predicted_at + make_interval(days => :h))
-        ORDER BY p.predicted_at
+        SELECT * FROM (
+            SELECT DISTINCT ON (o.id)
+                   p.id, p.field_id, p.predicted_at, p.model_version, p.features, p.risk_score,
+                   p.severity, o.outcome_type, o.stress_confirmed, o.diagnosis, o.yield_t_ha,
+                   o.observed_at
+            FROM predictions p
+            JOIN field_outcomes o
+              -- An explicit prediction_id always wins: when an agent says which forecast they were
+              -- checking, that link is ground truth and must not be second-guessed by a time window.
+              -- The window only rescues unlinked reports (a spontaneous field visit, an SMS).
+              ON o.prediction_id = p.id
+              OR (o.prediction_id IS NULL
+                  AND o.field_id = p.field_id
+                  AND o.observed_at BETWEEN p.predicted_at
+                                       AND p.predicted_at + make_interval(days => :h))
+            -- DISTINCT ON keeps the first row per outcome under this ordering, so the tie-break is
+            -- explicit rather than whatever the planner happened to emit.
+            ORDER BY o.id, p.predicted_at DESC
+        ) t
+        ORDER BY predicted_at
     """), {"h": horizon_days}).fetchall()
     return [dict(r._mapping) for r in rows]

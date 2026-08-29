@@ -1311,6 +1311,30 @@ Persistence never fails a prediction: losing the audit row is bad, refusing the 
 because the audit table is unavailable is worse. If the job has never run and the tables do not
 exist, predictions still serve and the write is logged and skipped.
 
+**A defect found by exercising this path rather than reading it.** `label_join` matches an outcome
+to a prediction two ways: an explicit `prediction_id`, or — for a spontaneous visit or an SMS that
+carries none — any prediction for the same field within the horizon. The second branch **fanned
+out**. `jobs/precompute` writes a prediction per field per *day*, so one unlinked agent report falls
+inside the horizon of every prediction in the preceding 30 and joined to all of them. Measured with
+five daily predictions, a single field visit produced **five** labels.
+
+Both halves of the feedback loop would have been corrupted, and quietly. `GET /outcomes/label-count`
+is the number that decides when phase 3 starts, and it would have read up to 30× high — the loop
+would have looked closed long before it was. And a training set built from this query would carry
+30 near-identical rows for one real fact, which is "39 monthly observations of one site are not 39
+independent facts" arriving in a new place.
+
+Fixed with `DISTINCT ON (o.id)`: one outcome, at most one row. Which prediction an unlinked report
+scores is a real question rather than a tie to break arbitrarily, and the answer is the most recent
+forecast standing when the agent looked — the advisory in force at the time of the visit. An
+explicit `prediction_id` still wins outright, since it matches only the first branch.
+
+Worth stating plainly about how this was found: every pre-existing test wrote **one** prediction per
+field, so none of them could see it. Four tests covered `label_join` — explicit link, unlinked
+inside the horizon, unlinked outside it, and an outcome preceding its prediction — and all four
+passed against the defect. The path had never been exercised in the shape production would actually
+produce.
+
 ---
 
 ## 11. Implemented in this branch
