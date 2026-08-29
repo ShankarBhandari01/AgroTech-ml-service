@@ -1,0 +1,237 @@
+{
+ "seed": 20260829,
+ "n_rows": 9376,
+ "loss_rate": 0.20819112627986347,
+ "n_ea": 359,
+ "coverage_screen": {
+  "SR_hect": 1.0,
+  "gps_area_m2": 0.8724,
+  "rent_paid": 0.1128,
+  "plot_value_ngn": 0.8766,
+  "plant_month": 1.0,
+  "has_extension_access": 1.0,
+  "asset_score": 1.0,
+  "market_access_score": 0.5662,
+  "crop_diversity": 1.0,
+  "irrigated": 1.0,
+  "used_fertilizer": 1.0,
+  "animal_traction": 1.0,
+  "n_crops_on_plot": 1.0
+ },
+ "stability": {
+  "gps_area_m2": {
+   "mean_importance": 0.04857,
+   "folds_positive": 5
+  },
+  "crop_diversity": {
+   "mean_importance": 0.03712,
+   "folds_positive": 5
+  },
+  "plot_value_ngn": {
+   "mean_importance": 0.02504,
+   "folds_positive": 5
+  },
+  "SR_hect": {
+   "mean_importance": 0.02435,
+   "folds_positive": 5
+  },
+  "crop_cassava": {
+   "mean_importance": 0.01221,
+   "folds_positive": 5
+  },
+  "market_access_score": {
+   "mean_importance": 0.0097,
+   "folds_positive": 4
+  },
+  "crop_maize": {
+   "mean_importance": 0.00838,
+   "folds_positive": 5
+  },
+  "asset_score": {
+   "mean_importance": 0.00806,
+   "folds_positive": 5
+  },
+  "has_extension_access": {
+   "mean_importance": 0.00355,
+   "folds_positive": 4
+  },
+  "n_crops_on_plot": {
+   "mean_importance": 0.00261,
+   "folds_positive": 4
+  },
+  "animal_traction": {
+   "mean_importance": 0.00208,
+   "folds_positive": 3
+  },
+  "crop_beans/cowpea": {
+   "mean_importance": 0.00162,
+   "folds_positive": 4
+  },
+  "crop_guinea_corn_(sorghum)": {
+   "mean_importance": 0.00159,
+   "folds_positive": 4
+  },
+  "used_fertilizer": {
+   "mean_importance": 0.00155,
+   "folds_positive": 3
+  },
+  "plant_month": {
+   "mean_importance": 0.00087,
+   "folds_positive": 3
+  },
+  "crop_rice": {
+   "mean_importance": 0.00015,
+   "folds_positive": 2
+  },
+  "irrigated": {
+   "mean_importance": -0.0,
+   "folds_positive": 1
+  },
+  "crop_millet/maiwa": {
+   "mean_importance": -0.00012,
+   "folds_positive": 1
+  }
+ },
+ "selected": [
+  "gps_area_m2",
+  "crop_diversity",
+  "plot_value_ngn",
+  "SR_hect",
+  "crop_cassava",
+  "market_access_score",
+  "crop_maize",
+  "asset_score",
+  "has_extension_access",
+  "n_crops_on_plot",
+  "animal_traction",
+  "crop_beans/cowpea",
+  "crop_guinea_corn_(sorghum)",
+  "used_fertilizer",
+  "plant_month"
+ ],
+ "results": {
+  "crop identity only": {
+   "features": [
+    "crop_diversity",
+    "crop_maize",
+    "crop_cassava",
+    "crop_guinea_corn_(sorghum)",
+    "crop_beans/cowpea",
+    "crop_millet/maiwa",
+    "crop_rice"
+   ],
+   "auc": 0.6554117826246006,
+   "auc_sd": 0.021310200708804548,
+   "pr_auc": 0.30921912565666415,
+   "brier": 0.157040980266482
+  },
+  "plot area only": {
+   "features": [
+    "SR_hect"
+   ],
+   "auc": 0.6464045496742121,
+   "auc_sd": 0.02465546255711795,
+   "pr_auc": 0.3076446589679311,
+   "brier": 0.1582874935391964
+  },
+  "all candidates": {
+   "features": [
+    "SR_hect",
+    "gps_area_m2",
+    "plot_value_ngn",
+    "plant_month",
+    "has_extension_access",
+    "asset_score",
+    "market_access_score",
+    "crop_diversity",
+    "irrigated",
+    "used_fertilizer",
+    "animal_traction",
+    "n_crops_on_plot",
+    "crop_maize",
+    "crop_cassava",
+    "crop_guinea_corn_(sorghum)",
+    "crop_beans/cowpea",
+    "crop_millet/maiwa",
+    "crop_rice"
+   ],
+   "auc": 0.7278540586502878,
+   "auc_sd": 0.022990985221498887,
+   "pr_auc": 0.4204846496073394,
+   "brier": 0.14735746085442675
+  },
+  "SELECTED": {
+   "features": [
+    "gps_area_m2",
+    "crop_diversity",
+    "plot_value_ngn",
+    "SR_hect",
+    "crop_cassava",
+    "market_access_score",
+    "crop_maize",
+    "asset_score",
+    "has_extension_access",
+    "n_crops_on_plot",
+    "animal_traction",
+    "crop_beans/cowpea",
+    "crop_guinea_corn_(sorghum)",
+    "used_fertilizer",
+    "plant_month"
+   ],
+   "auc": 0.7273026846520984,
+   "auc_sd": 0.02381569979438003,
+   "pr_auc": 0.4182285713665692,
+   "brier": 0.14745527935797806
+  },
+  "SELECTED, logistic": {
+   "features": [
+    "gps_area_m2",
+    "crop_diversity",
+    "plot_value_ngn",
+    "SR_hect",
+    "crop_cassava",
+    "market_access_score",
+    "crop_maize",
+    "asset_score",
+    "has_extension_access",
+    "n_crops_on_plot",
+    "animal_traction",
+    "crop_beans/cowpea",
+    "crop_guinea_corn_(sorghum)",
+    "used_fertilizer",
+    "plant_month"
+   ],
+   "auc": 0.6938219441587358,
+   "auc_sd": 0.010842915420842173,
+   "pr_auc": 0.3633300997865093,
+   "brier": 0.15262841799242136
+  }
+ },
+ "calibration": [
+  {
+   "predicted": 0.0365,
+   "observed": 0.0474,
+   "n": 1876
+  },
+  {
+   "predicted": 0.104,
+   "observed": 0.1296,
+   "n": 1875
+  },
+  {
+   "predicted": 0.169,
+   "observed": 0.1861,
+   "n": 1875
+  },
+  {
+   "predicted": 0.257,
+   "observed": 0.2499,
+   "n": 1877
+  },
+  {
+   "predicted": 0.4623,
+   "observed": 0.4282,
+   "n": 1873
+  }
+ ]
+}
