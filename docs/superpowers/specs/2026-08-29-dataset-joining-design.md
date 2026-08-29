@@ -86,8 +86,10 @@ time, in memory. This mirrors the rule the E07/E08 plan already states.
 ## 4. T3 — never joins at field resolution
 
 Public LSMS-ISA releases enumeration-area centroids, displaced 0–5 km (rural, 99%) or 0–10 km (1%).
-T1's satellite features are a 500 m box. **The displacement is ten times the feature footprint**, so
-the pixel at a published coordinate is in general not that household's pixel.
+T1's satellite features use a **±500 m AOI half-width** (`d = 0.005` degrees, `data/sentinel.py:204`)
+— a ~1.1 km box. Rural displacement reaches 5 km: **ten times that half-width, and roughly 64× the
+box in area** (a 5 km disc is 78.5 km2 against 1.2 km2). The pixel at a published coordinate is in
+general not that household's pixel.
 
 Therefore:
 
