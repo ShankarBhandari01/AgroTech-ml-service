@@ -80,6 +80,17 @@ batches and lets Python pace within one.
 - [ ] Commit.
 
 ### Task 4 (LATER — only when the new path is proven in production)
+
+**Blocker found while implementing Task 1 — resolve this BEFORE deleting the crontab.**
+`store.ensure_schema` is the only thing that creates this service's own tables (`field_features`,
+`predictions`, `field_outcomes`), and its docstring explains why only the batch job calls it:
+*"single-instance — not on API startup, where N replicas would race."* The batch **endpoint** is
+served by the API, so it correctly does **not** call it. Consequence: delete the crontab and nothing
+creates the schema on a fresh deployment. Decide the replacement first — a migration tool, a
+one-shot init job, or a retained single-instance bootstrap — and note that the current arrangement
+has been relying on a nightly cron job to perform DDL, which is not a property to carry forward
+deliberately.
+
 - [ ] Delete the crontab entry.
 - [ ] Remove `list_fields` and `_FIELDS_SQL` from `data/backend_schema.py`.
 - [ ] With `fetch_farmer_features` already gone by then, **`backend_schema.py` disappears entirely**
