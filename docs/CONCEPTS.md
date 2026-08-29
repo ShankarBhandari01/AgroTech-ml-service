@@ -188,6 +188,196 @@ should not: a farmer with irrigation and credit still loses the crop to late bli
 them to spray. The `(0.5 + 0.5v)` form bounds vulnerability's influence to a factor of two.
 **Warrant.** Design choice, argued not borrowed. The constant 0.5 is a judgement.
 
+### Composing a risk equation: the three rules, and how this implementation breaks two of them
+**Formula.** Composition happens at two levels, and they need different operators. *Within* hazard:
+`H = 1 − Π(1 − h_i)`. *Across* the three terms:
+`loss_rate = H × (0.5 + 0.5·v) × MAX_LOSS_FRACTION`, `expected_loss = exposure × loss_rate`.
+Hazard is dimensionless and probability-like; exposure is absolute currency; vulnerability is a
+modifier, never a magnitude — which is why it modulates rather than multiplies.
+
+**Rule 1 — no component may ever reach exactly 1. [RESOLVED — implemented]** Noisy-OR is monotone
+with an absorbing state: once any `h_i = 1`, `Π(1 − h_i) = 0` and the combination is 1 regardless of
+every other term. Use a soft asymptotic map, never a clamped linear ramp.
+
+This codebase used to contain both philosophies in one file — `vegetation_hazard_from_anomaly` was a
+logistic, while `drought`, `disease` and `heat` were clamped ramps. **Measured then: drought was
+exactly 1.0 for 59.5% of the panel**, leaving ONE distinct combined value across the entire top half.
+All four components are now `_soft_ramp` (`domain/risk.py`), a logistic returning `RAMP_LO = 0.02` at
+each map's no-hazard threshold and `RAMP_HI = 0.90` at its severe threshold, asymptotic at both ends.
+Every published threshold is unchanged; only the shape between and beyond them is.
+
+| on the committed panel | before | after |
+| --- | --- | --- |
+| combined hazard exactly 1.0 | 59.6% | **0.0000%** |
+| combined hazard exactly 0.0 | 22.1% | **0.0000%** |
+| distinct values in the top half | **1** | **137** |
+
+Three implementation points that are not obvious and are each load-bearing:
+
+* **The map must be asymmetric.** A logistic centred mid-ramp returns ~0.1 at a component's
+  no-hazard threshold, and four such components floor combined hazard near 0.34 for a field under no
+  stress at all. Pinning the edges at `RAMP_LO`/`RAMP_HI` avoids that.
+* **`RAMP_HI = 0.90`, not 1.0, is the point, not a rounding.** Headroom is what lets a field facing
+  severe drought *and* severe disease outrank one facing drought alone — the compounding noisy-OR
+  exists for and saturation destroyed.
+* **The guard must be applied last, after rounding.** Capping each component at `1 − 1e-9` does not
+  keep the combination below 1: `noisy_or` of four such components is `1 − 1e-36`, which *is* exactly
+  1.0 in float64, and `round(x, 3)` does the same to a single component. The absorbing state is a
+  property of the stored value, so `_no_saturate` runs last. `combined` is also stored at 6dp rather
+  than 3 — at 3dp, rounding alone collapsed 140 distinct top-half values back to 8.
+
+**Rule 2 — state the dependence assumption and measure it.** Noisy-OR assumes the components are
+independent; positively-correlated hazards would be over-counted. The Fréchet bounds size the error:
+`P(A ∪ B)` lies in `[max(p_A, p_B), min(1, p_A + p_B)]`, independence gives
+`p_A + p_B − p_A·p_B`, and perfect positive dependence gives `max`. So `noisy_or − max` is the
+over-count.
+**Measured, and it corrects the obvious expectation.** The physical drivers *are* strongly
+dependent — `water_satisfaction_30 ~ tmax_mean_30` = **−0.562**, `dry_spell_30 ~ tmax_mean_30` =
+**+0.561**, `rain_30 ~ tmax_mean_30` = **−0.530** — hot really does mean dry here. But the assembled
+`drought` and `heat` components correlate at only **−0.013** (Spearman −0.014), and the over-count is
+**0.0001 on average, differing at all in 0.07% of rows**. Independence is not vindicated by this;
+**the heat term is simply inert.** `heat_stress_days > 0` in **0.52%** of rows, because it is counted
+only during the `Flowering` stage and is zero at every other stage by construction. A term that never
+fires cannot over-count.
+**Consequence, as measured then.** Of the four hazard components, three could NOT discriminate: `drought`
+saturates (59.5% at 1.0), `heat` is inert (99.5% zero), and `disease` has no panel column at all
+(`cumulative_dsv` is derived in production from an hourly series that is never retained). Only
+`vegetation` has a working, smooth, strictly-monotone map. The combined hazard is, in practice,
+saturated drought.
+
+**Now:** the saturation is fixed -- all four components are logistics (Rule 1 above), so `drought`
+discriminates across its whole range. **The other two problems are untouched by that change and
+remain open:** `heat` still fires in only 0.52% of rows because it is gated to the Flowering stage,
+and `disease` still has no panel column, so `cumulative_dsv` is 0 for every offline analysis. A
+smooth map cannot manufacture a signal from a term that never fires or a column that does not exist.
+
+**The taxonomy is now seven components, and only three of them can fire.** E07 measured which shocks
+Nigerian farmers actually report (GHS-Panel Wave 5, share of households): weeds 15.7%, drought 13.9%,
+excess rain 10.6%, pests 9.2%, crop disease 6.7%, hail/frost 1.7%. The original four modelled
+drought, disease and heat -- and *heat maps to the rarest reported shock* while the three commonest
+after drought had no term at all. `pest` (fall armyworm degree-day generations), `excess_rain`
+(waterlogging, which a satisfaction ratio capped at 1.0 cannot express) and `weeds` were added.
+Stated honestly, that leaves:
+
+| component | can it fire? | why not, and what it would cost |
+| --- | --- | --- |
+| `drought` | **yes** | discriminates across its whole range since Rule 1 |
+| `vegetation` | **yes** | the learned model's only entry point |
+| `excess_rain` | **yes** | `rain_anomaly_30` is already in the feature row |
+| `pest` | **yes, in serving** | needs `gdd_since_onset`, present at serving; the panel has it too |
+| `heat` | barely — 0.52% of rows | gated to the Flowering stage by construction. Given heat is also the rarest *reported* shock (1.7%), this may be correct behaviour rather than a defect, and should be argued either way rather than assumed |
+| `disease` | **no, offline** | `cumulative_dsv` needs leaf-wetness *hours*; `data/meteo.py` fetches **daily** variables only. Making it fire offline means an hourly fetch over 90 days x 122 sites against a quota a single backfill has already exhausted, **plus a panel rebuild** — which is deliberately frozen (Part 9). Not a one-line change, and not attempted |
+| `weeds` | **no, anywhere** | the largest reported shock (15.7%) and no feed in this project carries a weeding signal — it depends on time since last weeding and labour availability. The parameter exists so the gap is visible in the signature; absent data it contributes nothing |
+
+**Why an inert term is not a conservative one.** Under noisy-OR a component fixed at 0 does not make
+the combination cautious — it silently reduces the model to the terms that do fire, so "seven hazards
+compound" describes the signature rather than the computation. The opposite error is worse: a term
+with no data contributing a *constant* would raise every field's hazard without discriminating
+between any of them, which is the can't-rank failure of Rule 1 arriving from the other direction.
+That is why each new term contributes only when its upstream is supplied, and why the count of
+components a write-up claims must be the count that can actually move.
+
+**Rule 3 — the term with the widest spread owns the ranking, whatever the equation says.** Multiplying
+a dimensionless `[0,1]` term by a currency term means the ordering is decided by relative spread, not
+by which term is better founded.
+**The diagnostic.** For a multiplicative model, take logs — they are additive — and decompose the
+variance of the final output by term. Measured (panel hazard real; exposure and vulnerability sampled
+over `notebooks/05-risk-composition.ipynb` §3's ranges, factors independent):
+
+| term | var(log) | share |
+| --- | --- | --- |
+| **exposure** (`area × yield × price`) | 0.8960 | **70.7%** |
+| hazard | 0.3335 | 26.3% |
+| vulnerability `(0.5 + 0.5v)` | 0.0386 | 3.0% |
+
+(area 27.6%, yield 27.4%, price 15.7% individually; covariance residual −5.2%, sampling noise.)
+
+**But the aggregate number misleads, and the correction matters more than the number.** Global
+`spearman(expected_loss, hazard) = +0.732` — *higher* than exposure's +0.516 — which reads as
+"hazard dominates". It did not. Under the clamped ramps hazard was nearly **binary**: 22.1% exactly 0, 59.6%
+exactly 1.0, only 18.2% strictly between. (Those shares are now 0% and 0% -- see Rule 1 -- but the
+conclusion below survived the fix, which is why it is stated as a rule rather than a bug report.) The high global correlation comes almost entirely
+from hazard correctly zeroing the bottom 22%, which is not the triage decision.
+Inside the decision-relevant region it inverts: of the top 100 fields by `expected_loss`, **98% have
+hazard exactly 1.0 (3 distinct values among 100)**, and within that top 100
+`spearman(expected_loss, hazard) = −0.061` against `spearman(expected_loss, exposure) = +0.605`.
+Reconstructing the top-100 queue from a single term recovers **49/100 by exposure alone but 4/100 by
+hazard alone**.
+**So: hazard decides who enters the queue; exposure decides the order within it.** A global rank
+correlation cannot see that split, which is why it must be measured on the region the product acts on.
+**The lesson:** run this decomposition before trusting any composed score, and run it *on the
+decision region*, not the whole distribution. One pass would have surfaced both defects above without
+any of the analysis that actually found them.
+
+**Measured again after Rule 1 was implemented — and the ranking did not move.** Removing the ties was
+necessary but *not sufficient*, which is the sharpest available statement of this rule:
+
+| same 3,578 rows | hazard share | exposure share |
+| --- | --- | --- |
+| clamped ramps | 26.3% | 70.7% |
+| smooth ramps | 34.2% | 63.1% |
+
+| dynamic range where triage happens | top-half span | ratio | distinct |
+| --- | --- | --- | --- |
+| hazard, clamped | 1.000000 – 1.000000 | 1.000x | 1 |
+| hazard, smooth | 0.992824 – 1.000000 | **1.007x** | 137 |
+| exposure | 45 – 10,249 USD | **227x** | — |
+
+Hazard can now order the queue; it still does not. Reconstructing the top 100 from a single term
+gives 48/100 by exposure and **2/100** by hazard (was 49 and 4). The cause was never only the ties —
+it is that hazard is structurally bounded to `[0,1]` while `exposure = area × yield × price` is three
+unbounded numbers multiplied together. **A bounded term cannot out-rank an unbounded one**, however
+well shaped it is. Fixing the ranking requires bounding exposure or ranking on something other than
+`expected_loss`, not a better hazard map.
+
+*(Beware one trap in re-measuring this: the pre-fix decomposition silently dropped the 1,018 rows
+whose hazard was exactly 0, since `log 0` is undefined. Those rows return under the smooth map with
+large negative logs, which inflates hazard's apparent share to 64.6%. The table above restricts both
+arms to the same 3,578 rows.)*
+
+**Re-measured against REAL exposure (E07), which superseded the illustrative grid — and the
+conclusion got stronger.** Every exposure figure above came from `notebooks/05-risk-composition.ipynb`
+§3's *illustrative* ranges (area uniform 0.5–5 ha, yield uniform 0.5–5 t/ha, four sourced prices),
+because no exposure data existed anywhere in this repository. It does now:
+`experiments/E07-lsms/exposure.py` builds `area_ha`, `yield_t_ha` and `price_per_t` from Nigeria
+GHS-Panel Wave 5 — 3,011 households, 8,091 crop-plot rows. Holding the same panel hazard fixed and
+swapping only the exposure distribution:
+
+| term | illustrative grid | **real GHS-Panel** |
+| --- | --- | --- |
+| **exposure** | 34.0% | **76.9%** |
+| hazard | 64.5% | 22.5% |
+| — area | 13.3% | 26.3% |
+| — yield | 13.2% | **42.4%** |
+| — price | 7.4% | 8.3% |
+| vulnerability | 1.5% | 0.5% |
+
+`var(log exposure)` rises from 0.90 to **5.84** — the uniform grid was far too tame. Real smallholder
+plots start near 0.01 ha and real yields span orders of magnitude, so the honest spread is much wider
+than any uniform range. Comparing interquartile ratios rather than extremes (one near-zero row makes
+the full ratio meaningless): real exposure varies **7.7×** between an ordinary low and an ordinary
+high farm, against the grid's 3.7×.
+
+Reconstructing the top-100 queue from a single term: **64/100 by exposure, 5/100 by hazard**, and
+`spearman(expected_loss, hazard)` *inside* the top 100 is **−0.031** — indistinguishable from no
+relationship. Nearly two-thirds of the triage order is reproducible from farm size, yield and price
+alone.
+
+**The corollary worth stating plainly.** `yield` alone contributes **42.4%** of the variance in
+`expected_loss` — nearly double the entire hazard model's 22.5%. And yield is the least reliable
+quantity in the whole chain: validated against FAO on sole-cropped plots it reads 0.87× for rice and
+0.84× for sorghum, but 0.44× for maize and **0.21× for cassava** (harvested piecemeal over months, so
+a post-harvest visit captures harvest-to-date, not the season). Only **9.0%** of households have all
+their yields from crops this repository is willing to trust. The single largest driver of who gets an
+extension visit is the term with the weakest measurement — and note this is a *survey* population,
+not this product's registered farmers, so it bounds the shape of the problem rather than solving it.
+
+**Warrant.** The two-level decomposition is IPCC AR5/AR6 `Risk = f(Hazard, Exposure, Vulnerability)`
+[verified]. Noisy-OR is a standard construction for independent causes [verified]. Fréchet bounds are
+standard probability [verified]. The saturation, dependence, inertness and spread figures above are
+**measurements on this repository's panel**, reproducible from `data/training_set.parquet` — not
+citations. The `(0.5 + 0.5v)` constant and the choice to rank on `expected_loss` remain judgements.
+
 ### Exposure, and two outputs
 **Formula.** `exposure = area × expected_yield × price`; `expected_loss = exposure × loss_rate`.
 **Why.** `risk_score` (0–100, a loss *rate*) is comparable across farms of any size and is what a

@@ -916,6 +916,11 @@ invalid observations included.
 
 ## 9.3 The drought term saturates for 60% of the panel, and a ranking cannot see past it
 
+> **SUPERSEDED by 9.3a -- the defect described here has been fixed.** All four hazard components
+> are now logistics; combined hazard is exactly 1.0 for 0.0000% of the panel. This section is kept
+> unchanged because it is the measurement and the argument that justified the change -- and because
+> 9.3a's central finding is that fixing it did **not** change the triage queue.
+
 Computed with the real `domain.risk.assess_hazard` over all 4,596 panel rows, with `cumulative_dsv=0`
 and `vegetation=0` because neither is retained in the panel (production derives DSV from a raw hourly
 series that is never stored; see §9's "not available in the panel" note on the same columns).
@@ -973,6 +978,292 @@ This section does not decide between a smooth mapping and a different threshold 
 are candidates by the vegetation precedent, and choosing between them is a product decision about
 what a hazard of 1.0 should mean (does drought stop getting worse at `water_satisfaction_30 = 0.35`,
 or does it keep ranking past that point?), not a modelling one.
+
+### 9.3a Resolved — the smooth mapping was adopted, and it did not change the queue
+
+The choice above was made: **all four hazard components are now logistics** (`domain/risk.py`,
+`_soft_ramp`), matching what `vegetation_hazard_from_anomaly` always did. Every published threshold is
+unchanged; the map returns `RAMP_LO = 0.02` where the old ramp read 0 and `RAMP_HI = 0.90` where it
+read 1, asymptotic at both ends. `_no_saturate` runs last, after rounding, because the absorbing
+state is a property of the stored value: `noisy_or` of four components each capped at `1 − 1e-9`
+is `1 − 1e-36`, which is exactly 1.0 in float64. `combined` is stored at 6dp, since at 3dp rounding
+alone collapsed 140 distinct top-half values back to 8.
+
+| on the committed panel | before | after |
+| --- | --- | --- |
+| combined hazard exactly 1.0 | 59.6% | **0.0000%** |
+| combined hazard exactly 0.0 | 22.1% | **0.0000%** |
+| distinct values in the top half | **1** | **137** |
+| severe drought, then adding severe disease | absorbed, no change | +0.0015 |
+
+Full suite: **201 passed, 1 skipped**. Two test expectations were changed, both deliberately, and
+both are behaviour changes worth knowing about:
+
+* A calm field no longer scores exactly 0. `assess_risk` on a calm field with $1,500 at risk now
+  returns **$20.02** expected loss rather than $0.00 (1.3%, severity still `NORMAL`). Strictly
+  monotone maps have no exact zeros — and that is the point, since exact zeros tied 22% of the panel
+  at the bottom of the queue where nothing could order them.
+* At the published spray threshold `disease` reads `RAMP_HI = 0.90`, not 1.0.
+
+A latent bug surfaced while testing this: `vegetation_hazard_from_anomaly` raised `OverflowError` on
+an extreme peer anomaly, because `1/(1 + exp(x))` overflows for `x > 709` in float64. A degenerate
+cohort standard deviation can produce such a z. It now routes through a sign-split `_logistic`.
+
+**What this did NOT fix, which matters more than what it did.** Removing the ties restored hazard's
+*ability* to order the queue and did not change the order:
+
+| same 3,578 rows | hazard share of var(log expected_loss) | exposure share |
+| --- | --- | --- |
+| clamped ramps | 26.3% | 70.7% |
+| smooth ramps | 34.2% | 63.1% |
+
+Reconstructing the top 100 from one term gives 48/100 by exposure and **2/100** by hazard (was 49 and
+4). The reason is dynamic range, not ties: across the panel's top half, hazard now spans
+0.992824–1.000000, a ratio of **1.007×**, while exposure spans 45–10,249 USD, a ratio of **227×**.
+Hazard is structurally bounded to [0,1]; `exposure = area × yield × price` is three unbounded numbers
+multiplied together. A bounded term cannot out-rank an unbounded one however well shaped it is, so
+the queue's ordering problem is exposure, and it is not addressable by any hazard map.
+
+*(One measurement trap, recorded because it initially misled this analysis: the pre-fix decomposition
+silently dropped the 1,018 rows whose hazard was exactly 0, since `log 0` is undefined. Under the
+smooth map those rows return with large negative logs and inflate hazard's apparent share to 64.6%.
+The table above restricts both arms to the same 3,578 rows.)*
+
+**Unaffected by this change, verified rather than assumed:** `assess_hazard` and `assess_risk` are
+called only from `serving/pipeline.py`. `lab/` never imports `domain.risk`, and `forward_z` is
+computed in `lab/panel/panel.py` independently. **E01, E02, E05 and E06 therefore cannot move** — they
+measure the panel and the label, not the risk composition. Re-running them would reproduce identical
+numbers.
+
+### 9.4 The ranking deprioritises the most vulnerable households — measured, not hypothesised
+
+**Status: open. This is an equity defect in the composed ranking, not a bug in any single function.**
+
+Until E07 there was no data for exposure or vulnerability, so every analysis here — including §9.3a's
+variance decomposition — sampled them **independently**. With both terms built from Nigeria GHS-Panel
+Wave 5 for the same 3,011 households (`experiments/E07-lsms/`), that assumption is testable, and it
+is false:
+
+| | spearman |
+| --- | --- |
+| exposure ~ vulnerability | **−0.410** |
+| farm size ~ vulnerability | −0.378 |
+| yield ~ vulnerability | +0.076 |
+
+Poorer, less-equipped households farm smaller plots. Composed through the real `assess_risk`:
+
+```
+spearman(expected_loss, vulnerability)  = -0.289
+vulnerability, top-200 by expected_loss :  0.766
+vulnerability, everyone else            :  0.799
+```
+
+**A queue ranked by `expected_loss` puts less-vulnerable farmers first.** By arithmetic, not intent:
+`expected_loss = exposure × loss_rate`, and least coping capacity co-occurs with least value at risk.
+
+**Why the existing design does not prevent it.** `(0.5 + 0.5·v)` was chosen so vulnerability *raises*
+the loss rate rather than zeroing it (§4.5, and `CONCEPTS.md` "Vulnerability as a modulation"). But
+that modulation is bounded to a factor of two, while exposure varies **7.7× across the interquartile
+range** of real smallholder farms. The correction is overwhelmed by exposure's spread and then pushed
+the wrong way by the negative correlation between the two terms. Both design choices are individually
+defensible; the interaction is what fails.
+
+**Relation to the fairness guard already in place.** `PROTECTED_ATTRIBUTES` makes
+`assess_vulnerability` raise if a protected characteristic is used as an input, so protected
+attributes cannot *drive* vulnerability. Nothing checks whether the **composed ranking** disadvantages
+poor households through farm size — and it does. The guard covers the input surface, not the outcome.
+
+**Not decided here**, because it is a product and ethical decision, not a modelling one:
+
+* rank by `risk_score` (a loss *rate*, exposure-free) rather than `expected_loss`;
+* cap or log-compress exposure so it cannot dominate;
+* stratify the queue so a share of visits is reserved by vulnerability;
+* or accept expected-loss ranking explicitly, on the stated basis that it maximises value protected
+  per visit — which is a coherent position, but should be a decision on record rather than a
+  by-product of the formula.
+
+**What is measured and what is composed.** The −0.410 correlation is measured from survey data alone
+and depends on no hazard. The expected-loss magnitudes and the severity mix (1,886 of 3,011 CRITICAL)
+are composed: these households have no coordinates, so hazard was drawn from the panel's own
+distribution. The 63% CRITICAL rate suggests the severity thresholds are miscalibrated for this
+population, but that rests on a drawn hazard and is not claimed. **Population caveat:** GHS-Panel is a
+national survey sample, not this product's registered farmers — see
+`experiments/E07-lsms/FINDINGS.md` for the falsification test to run once real users exist.
+
+---
+
+**Deliberately not changed:** the two clamped ramps in `domain/indices.py`. `vci`'s [0,100] clamp is
+definitional to Kogan (1990) and changing it would break the citation, and `moisture` feeds
+`CropHealth`, a weighted **mean** — which has no absorbing state. The rule follows from noisy-OR's
+algebra and does not generalise to every clamp in the codebase.
+
+---
+
+## 9.5 The composition, scored against a realised outcome — and it loses to its own exposure term
+
+**This is the first time the composed score has been compared to anything that happened.** §9.3a
+fixed hazard's saturation, §9.4 measured the equity consequence of the ranking, and both reasoned
+about the *terms*. Neither scored `Risk = Hazard × Exposure × Vulnerability` **as a whole** against
+an outcome, because no outcome existed. E10 produced one, on the same survey households E07 composed
+risk for, and the two join on `hhid`. Experiment: `experiments/E11-composed-validation/`; notebook:
+`notebooks/10-does-the-risk-equation-work.ipynb`.
+
+2,875 households, 355 EAs, prevalence of `any_loss` 0.2894. Unit is the **household**, because a
+visit goes to a farmer; intervals resample **EAs**, never households.
+
+**What it can and cannot settle.** E07's `hazard` is *drawn* — Wave 5 ships no coordinates. So this
+scores the **exposure × vulnerability** composition, which is 77.4% of `var(log expected_loss)` and
+the part under dispute. It cannot validate the hazard model; nothing in this repository can until
+outcome capture runs. The drawn hazard also supplies a **negative control**, and it passes: hazard
+alone scores AUC **0.496 [0.473, 0.519]**, spanning chance. The harness is sound.
+
+| ranking | AUC | 95% CI (EA) | PR-AUC | P@50 | vuln@50 |
+| --- | --- | --- | --- | --- | --- |
+| `expected_loss` (production queue) | **0.537** | [0.505, 0.567] | 0.316 | 0.300 | 0.728 |
+| `risk_score` | 0.466 | [0.443, 0.489] | 0.268 | tied | 0.954 |
+| `expected_loss`, log-compressed exposure | 0.512 | [0.487, 0.538] | 0.301 | 0.320 | 0.818 |
+| `exposure` alone | 0.564 | [0.526, 0.597] | 0.334 | 0.360 | 0.721 |
+| `hazard` alone — negative control | 0.496 | [0.473, 0.519] | 0.289 | tied | 0.818 |
+| E10 fitted model — ceiling | **0.652** | [0.621, 0.683] | 0.429 | 0.560 | 0.665 |
+
+Base rate 0.289; population mean vulnerability 0.780.
+
+### Composing costs ordering information
+
+Paired EA bootstrap — both arms scored on the same resample, so the shared between-EA variance
+cancels. Comparing the independent intervals above would not answer this question.
+
+| contrast | ΔAUC | 95% CI | P(Δ>0) |
+| --- | --- | --- | --- |
+| `expected_loss` − `exposure` alone | **−0.0269** | [−0.0438, −0.0100] | 0.001 |
+| `expected_loss` − `hazard` (control) | +0.0403 | [+0.0137, +0.0653] | 0.999 |
+| `risk_score` − `expected_loss` | −0.0704 | [−0.1048, −0.0349] | 0.000 |
+| E10 ceiling − `expected_loss` | **+0.1149** | [+0.0840, +0.1442] | 1.000 |
+
+`expected_loss` ranks **below `exposure` alone**, and the interval excludes zero. §9.3a and
+`CONCEPTS.md` Rule 3 established that the composite is exposure-*dominated*; measured against an
+outcome it is exposure *degraded*. Multiplying by a drawn hazard and a real vulnerability removes
+ordering information rather than adding any.
+
+**The confound, checked rather than assumed.** `any_loss` rises mechanically with plot count, and
+exposure correlates with plot count (spearman +0.228), so exposure's edge could be counting plots.
+Most of it is: plot count alone gives AUC 0.553 against exposure's 0.564. A residual survives —
+within fixed plot-count strata exposure holds 0.521 / 0.534 / 0.549 at 1 / 2 / 3 plots, and on the
+count-free `share_loss` rate it keeps **+0.117** spearman against `expected_loss`'s +0.069. Larger
+farms do lose crop slightly more often, so exposure is not purely a magnitude term. +0.117 is not a
+mandate to own 77% of the ranking.
+
+**Decision curve** (net benefit, ceiling = event rate 0.2894). At `t ≤ 0.20` every composed arm is
+*identical to visiting everyone* — the scaled probabilities put the whole population above the
+threshold. At `t = 0.30` `expected_loss` clears "visit nobody" by 0.0093. Only the fitted model
+clears both trivial strategies across the range (0.0588 at t = 0.30, 0.0212 at 0.40).
+
+### The robustness result, which is independent of everything above
+
+For a triage queue, the order moving matters more than any figure being wrong. Perturbing only by
+error this repository has already measured — per-crop yield against FAO, and plot area at its
+recorded rank agreement of spearman +0.549 (n=5,137):
+
+| scenario | top-50 retained | top-100 | top-200 | ρ vs base |
+| --- | --- | --- | --- | --- |
+| A — yields corrected to FAO by crop mix | 0.84 | 0.76 | 0.855 | 0.976 |
+| B — plot-area measurement error | **0.10** | 0.15 | 0.25 | 0.657 |
+| C — both | 0.16 | 0.21 | 0.30 | 0.629 |
+
+The systematic yield bias is benign. The **random** area error destroys the order: one in ten of the
+top 50 survives. **Ranking farmers 1..50 asserts a precision the inputs cannot support.** Either
+improve area measurement, or serve an unordered top-k. This conclusion does not depend on the drawn
+hazard, on the confound above, or on which term dominates.
+
+### 9.5a Two defects found and fixed here
+
+**`risk_score` could not order a 50-farmer queue.** It was `round(score, 1)`, leaving **566 distinct
+values across 3,011 households** with the 50th and 51st farmer tied — so the top 50 of an
+exposure-free queue was an artifact of DataFrame row order. §9.3a learned exactly this on
+`Hazard.combined` (3dp collapsed 140 top-half values to 8, hence 6dp) and the lesson was never
+applied to the field a queue actually sorts on, because only `combined` was audited. Now
+`round(exact, 4)` — 2,089 distinct, untied; 6dp adds seven values and nothing else. Display
+precision is a presentation choice and belongs to whatever renders it.
+
+**Severity was decided by that rounding.** The bands read the rounded `risk_score`, so a field at
+64.96 rounded to 65.0 and banded CRITICAL while 64.94 banded ELEVATED. They now read the exact
+value. On E07's households the two agree on all 3,011 rows, so no observed outcome changes; a
+coupling that could flip a band for no explicable reason is gone.
+
+Both are covered by tests that were **verified to fail against the pre-fix code** —
+`test_risk_score_can_order_a_queue_without_ties` and
+`test_severity_is_decided_by_the_exact_score_not_the_rounded_one`. The first needed two attempts:
+its initial version separated fields by 0.23 score points, which 1dp resolves, so it passed against
+the defect it existed to catch. It now asserts the fields span under a tenth of a point *before*
+asserting distinctness. This is the failure the joining spec §7 names — "a test that passes against
+broken code is worse than no test — four did so earlier in this project."
+
+### 9.5b The severity bands cannot be fixed by moving them
+
+E07's 63% CRITICAL rate looked like miscalibrated thresholds. Measured on the committed panel
+(4,596 rows, **real** hazard, vulnerability held at E07's median 0.798), the problem is worse and
+different: `risk_score` is **bimodal**.
+
+```
+percentiles:  p10 3.9   p25 7.6   p50 89.2   p75 89.8   p90 89.8
+bands:        CRITICAL 63.3%   NORMAL 28.8%   ELEVATED 4.2%   WATCH 3.7%
+```
+
+E07's independent households reproduce it (62.6 / 29.8 / 4.0 / 3.6). The cuts 65 / 35 / 15 sit at
+the 28.8th, 32.5th and 36.7th percentiles — **three of the four bands are decided inside a region
+holding about 8% of fields**, and the middle of the range is empty.
+
+The cause is upstream of the numbers. `_soft_ramp` is a logistic: a field past a component's severe
+threshold asymptotes toward `RAMP_HI`, one below the no-hazard threshold toward `RAMP_LO`. §9.3a
+fixed the *ties* and never claimed to change the *shape*. So no absolute cut can discriminate here —
+moving them relabels the same near-binary split.
+
+The fix is to band by **capacity**: quantiles of the population actually served, so CRITICAL means
+"the k fields an officer can reach this week" rather than an absolute score. That needs the served
+distribution, which `predictions` already records on every row — a query once there is traffic, not
+a modelling problem. The thresholds are now `SEVERITY_BANDS` in `domain/risk.py` with this
+measurement recorded beside them, so recalibration is one place rather than four literals in a
+branch. **No new numbers were invented**: there is no distribution in this repository with real
+hazard *and* real vulnerability to calibrate against.
+
+### 9.5c The ranking target — the decision §9.4 left open, now priced
+
+§9.4 declined to choose between ranking keys on the grounds that it is a product and ethical
+decision rather than a modelling one. That remains true. What was missing was the cost of each
+option, and E11 supplies it:
+
+| queue key | AUC vs realised loss | mean vulnerability of top 50 | what it optimises |
+| --- | --- | --- | --- |
+| `expected_loss` | 0.537 | 0.728 (**below** the 0.780 population mean) | value protected per visit |
+| `expected_loss`, log-compressed exposure | 0.512 | 0.818 | a middle position |
+| `risk_score` (exposure-free) | 0.466 (**below chance**) | 0.954 | reaching the least able to cope |
+
+Read plainly: `expected_loss` finds slightly more real loss and prioritises the *less* vulnerable.
+`risk_score` reverses the equity inversion completely and **ranks worse than chance** against
+realised loss — equity bought at the price of finding anyone. Log-compressed exposure costs 0.025
+AUC and buys +0.09 vulnerability.
+
+**Recommendation, not a decision.** Log-compressed exposure is the defensible default: it keeps
+exposure's genuine (if small, §9.5's confound paragraph) relationship to realised loss while
+removing the 227× dynamic range that lets farm size own the ranking. But given §9.5's robustness
+result — 10% top-50 retention — **the ordering question is currently less important than the claim
+to have an ordering at all.** Serving an unordered top-k makes the choice between these three keys
+much less consequential, and is the cheaper change.
+
+Nothing here is shipped. `RiskAssessment` already returns both fields; which one a queue sorts on is
+the caller's decision, and it should be recorded as one rather than inherited from the formula.
+
+### What E11 does not say
+
+It does not say the risk equation is wrong. Hazard is drawn here; the decomposition remains
+separately defensible; and an extension officer can act on "water deficit 60 mm at flowering,
+dominant hazard drought" without trusting the composed rank at all. The finding is narrower and
+firmer: **as a ranking key, the composed score does not beat its own exposure term, and its order
+does not survive the measurement error this repository has already documented.**
+
+Population caveat unchanged: GHS-Panel is a national survey sample, not this product's registered
+farmers, and E07's falsification test applies to every number above. The label is `sa3iq6` — was
+area harvested less than area planted — a partial-loss indicator, not yield.
 
 ---
 

@@ -1,0 +1,416 @@
+{
+ "git_sha": "d1e6e2f",
+ "seed": 20260829,
+ "unit": "household",
+ "n_households": 2875,
+ "n_ea": 355,
+ "prevalence_any_loss": 0.2894,
+ "mean_share_loss": 0.2159,
+ "mean_vulnerability_all": 0.7801,
+ "hazard_is_drawn": true,
+ "rankings": {
+  "expected_loss": {
+   "auc": 0.5366,
+   "auc_ci_ea_bootstrap": [
+    0.5054,
+    0.5671
+   ],
+   "pr_auc": 0.3162,
+   "spearman_vs_share_loss": 0.0694,
+   "p_at_50": 0.3,
+   "mean_vulnerability_top50": 0.7281,
+   "p_at_100": 0.32,
+   "mean_vulnerability_top100": 0.7501,
+   "p_at_200": 0.315,
+   "mean_vulnerability_top200": 0.7421,
+   "decision_curve": [
+    {
+     "threshold": 0.1,
+     "model": 0.2104,
+     "visit_all": 0.2104
+    },
+    {
+     "threshold": 0.2,
+     "model": 0.1117,
+     "visit_all": 0.1117
+    },
+    {
+     "threshold": 0.3,
+     "model": 0.0093,
+     "visit_all": -0.0152
+    },
+    {
+     "threshold": 0.4,
+     "model": -0.0002,
+     "visit_all": -0.1843
+    },
+    {
+     "threshold": 0.5,
+     "model": 0.0,
+     "visit_all": -0.4212
+    }
+   ]
+  },
+  "risk_score": {
+   "auc": 0.466,
+   "auc_ci_ea_bootstrap": [
+    0.4427,
+    0.4895
+   ],
+   "pr_auc": 0.2678,
+   "spearman_vs_share_loss": -0.0553,
+   "p_at_50": 0.2894,
+   "mean_vulnerability_top50": 0.954,
+   "p_at_100": 0.2894,
+   "mean_vulnerability_top100": 0.9487,
+   "p_at_200": 0.2894,
+   "mean_vulnerability_top200": 0.9383,
+   "decision_curve": [
+    {
+     "threshold": 0.1,
+     "model": 0.2104,
+     "visit_all": 0.2104
+    },
+    {
+     "threshold": 0.2,
+     "model": 0.1117,
+     "visit_all": 0.1117
+    },
+    {
+     "threshold": 0.3,
+     "model": -0.0063,
+     "visit_all": -0.0152
+    },
+    {
+     "threshold": 0.4,
+     "model": 0.0,
+     "visit_all": -0.1843
+    },
+    {
+     "threshold": 0.5,
+     "model": 0.0,
+     "visit_all": -0.4212
+    }
+   ]
+  },
+  "expected_loss_log_exposure": {
+   "auc": 0.5117,
+   "auc_ci_ea_bootstrap": [
+    0.4868,
+    0.538
+   ],
+   "pr_auc": 0.3006,
+   "spearman_vs_share_loss": 0.0266,
+   "p_at_50": 0.32,
+   "mean_vulnerability_top50": 0.8178,
+   "p_at_100": 0.25,
+   "mean_vulnerability_top100": 0.8114,
+   "p_at_200": 0.305,
+   "mean_vulnerability_top200": 0.8013,
+   "decision_curve": [
+    {
+     "threshold": 0.1,
+     "model": 0.2104,
+     "visit_all": 0.2104
+    },
+    {
+     "threshold": 0.2,
+     "model": 0.1117,
+     "visit_all": 0.1117
+    },
+    {
+     "threshold": 0.3,
+     "model": -0.0186,
+     "visit_all": -0.0152
+    },
+    {
+     "threshold": 0.4,
+     "model": 0.0,
+     "visit_all": -0.1843
+    },
+    {
+     "threshold": 0.5,
+     "model": 0.0,
+     "visit_all": -0.4212
+    }
+   ]
+  },
+  "exposure_only": {
+   "auc": 0.5635,
+   "auc_ci_ea_bootstrap": [
+    0.5261,
+    0.5968
+   ],
+   "pr_auc": 0.3339,
+   "spearman_vs_share_loss": 0.1165,
+   "p_at_50": 0.36,
+   "mean_vulnerability_top50": 0.7206,
+   "p_at_100": 0.2894,
+   "mean_vulnerability_top100": 0.7241,
+   "p_at_200": 0.2894,
+   "mean_vulnerability_top200": 0.725,
+   "decision_curve": [
+    {
+     "threshold": 0.1,
+     "model": 0.2104,
+     "visit_all": 0.2104
+    },
+    {
+     "threshold": 0.2,
+     "model": 0.1099,
+     "visit_all": 0.1117
+    },
+    {
+     "threshold": 0.3,
+     "model": 0.0237,
+     "visit_all": -0.0152
+    },
+    {
+     "threshold": 0.4,
+     "model": -0.0009,
+     "visit_all": -0.1843
+    },
+    {
+     "threshold": 0.5,
+     "model": -0.0003,
+     "visit_all": -0.4212
+    }
+   ]
+  },
+  "vulnerability_only": {
+   "auc": 0.43,
+   "auc_ci_ea_bootstrap": [
+    0.3951,
+    0.4642
+   ],
+   "pr_auc": 0.2556,
+   "spearman_vs_share_loss": -0.1141,
+   "p_at_50": 0.2894,
+   "mean_vulnerability_top50": 0.9577,
+   "p_at_100": 0.2894,
+   "mean_vulnerability_top100": 0.9549,
+   "p_at_200": 0.2894,
+   "mean_vulnerability_top200": 0.951,
+   "decision_curve": [
+    {
+     "threshold": 0.1,
+     "model": 0.2104,
+     "visit_all": 0.2104
+    },
+    {
+     "threshold": 0.2,
+     "model": 0.1117,
+     "visit_all": 0.1117
+    },
+    {
+     "threshold": 0.3,
+     "model": 0.0224,
+     "visit_all": -0.0152
+    },
+    {
+     "threshold": 0.4,
+     "model": 0.0002,
+     "visit_all": -0.1843
+    },
+    {
+     "threshold": 0.5,
+     "model": 0.0,
+     "visit_all": -0.4212
+    }
+   ]
+  },
+  "hazard_only__NEGATIVE_CONTROL": {
+   "auc": 0.496,
+   "auc_ci_ea_bootstrap": [
+    0.4729,
+    0.5191
+   ],
+   "pr_auc": 0.2892,
+   "spearman_vs_share_loss": -0.0078,
+   "p_at_50": 0.2894,
+   "mean_vulnerability_top50": 0.8183,
+   "p_at_100": 0.2894,
+   "mean_vulnerability_top100": 0.8095,
+   "p_at_200": 0.2894,
+   "mean_vulnerability_top200": 0.7756,
+   "decision_curve": [
+    {
+     "threshold": 0.1,
+     "model": 0.2104,
+     "visit_all": 0.2104
+    },
+    {
+     "threshold": 0.2,
+     "model": 0.1117,
+     "visit_all": 0.1117
+    },
+    {
+     "threshold": 0.3,
+     "model": -0.0083,
+     "visit_all": -0.0152
+    },
+    {
+     "threshold": 0.4,
+     "model": 0.0,
+     "visit_all": -0.1843
+    },
+    {
+     "threshold": 0.5,
+     "model": 0.0,
+     "visit_all": -0.4212
+    }
+   ]
+  },
+  "E10_fitted_model__CEILING": {
+   "auc": 0.6516,
+   "auc_ci_ea_bootstrap": [
+    0.6206,
+    0.6835
+   ],
+   "pr_auc": 0.4288,
+   "spearman_vs_share_loss": 0.2541,
+   "p_at_50": 0.56,
+   "mean_vulnerability_top50": 0.6652,
+   "p_at_100": 0.58,
+   "mean_vulnerability_top100": 0.6699,
+   "p_at_200": 0.55,
+   "mean_vulnerability_top200": 0.688,
+   "decision_curve": [
+    {
+     "threshold": 0.1,
+     "model": 0.2104,
+     "visit_all": 0.2104
+    },
+    {
+     "threshold": 0.2,
+     "model": 0.1196,
+     "visit_all": 0.1117
+    },
+    {
+     "threshold": 0.3,
+     "model": 0.0588,
+     "visit_all": -0.0152
+    },
+    {
+     "threshold": 0.4,
+     "model": 0.0212,
+     "visit_all": -0.1843
+    },
+    {
+     "threshold": 0.5,
+     "model": 0.0045,
+     "visit_all": -0.4212
+    }
+   ]
+  }
+ },
+ "paired_contrasts": {
+  "expected_loss - exposure_only": {
+   "delta_auc": -0.0269,
+   "ci": [
+    -0.0438,
+    -0.01
+   ],
+   "p_positive": 0.0005
+  },
+  "expected_loss - hazard_only": {
+   "delta_auc": 0.0403,
+   "ci": [
+    0.0137,
+    0.0653
+   ],
+   "p_positive": 0.9985
+  },
+  "risk_score - expected_loss": {
+   "delta_auc": -0.0704,
+   "ci": [
+    -0.1048,
+    -0.0349
+   ],
+   "p_positive": 0.0
+  },
+  "E10_ceiling - expected_loss": {
+   "delta_auc": 0.1149,
+   "ci": [
+    0.084,
+    0.1442
+   ],
+   "p_positive": 1.0
+  }
+ },
+ "tie_diagnostics": {
+  "expected_loss": {
+   "distinct": 2483,
+   "of_n": 2875,
+   "tied_at_k50": false
+  },
+  "risk_score": {
+   "distinct": 557,
+   "of_n": 2875,
+   "tied_at_k50": true
+  },
+  "vuln_score": {
+   "distinct": 341,
+   "of_n": 2875,
+   "tied_at_k50": true
+  },
+  "hazard": {
+   "distinct": 503,
+   "of_n": 2875,
+   "tied_at_k50": true
+  },
+  "value_at_risk_usd": {
+   "distinct": 1469,
+   "of_n": 2875,
+   "tied_at_k50": false
+  }
+ },
+ "confound_check": {
+  "auc_plot_count_alone": 0.5531,
+  "auc_exposure_alone": 0.5635,
+  "spearman_exposure_vs_plot_count": 0.2283,
+  "spearman_vs_share_loss": {
+   "exposure": 0.1165,
+   "expected_loss": 0.0694,
+   "plot_count": 0.0465
+  },
+  "auc_exposure_within_plot_count_strata": {
+   "n_plots_1": {
+    "n": 562,
+    "prevalence": 0.2331,
+    "auc_exposure": 0.5211
+   },
+   "n_plots_2": {
+    "n": 781,
+    "prevalence": 0.265,
+    "auc_exposure": 0.5337
+   },
+   "n_plots_3": {
+    "n": 603,
+    "prevalence": 0.3101,
+    "auc_exposure": 0.5488
+   }
+  }
+ },
+ "rank_stability": {
+  "A_yield_corrected_to_fao": {
+   "top50_retained": 0.84,
+   "top100_retained": 0.76,
+   "top200_retained": 0.855,
+   "spearman_vs_base": 0.9761
+  },
+  "B_area_measurement_error": {
+   "top50_retained": 0.1,
+   "top100_retained": 0.15,
+   "top200_retained": 0.25,
+   "spearman_vs_base": 0.657
+  },
+  "C_both": {
+   "top50_retained": 0.16,
+   "top100_retained": 0.21,
+   "top200_retained": 0.3,
+   "spearman_vs_base": 0.6287
+  },
+  "area_noise_sigma": 2.2711
+ }
+}
